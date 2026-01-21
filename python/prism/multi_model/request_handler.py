@@ -34,7 +34,7 @@ import zmq.asyncio
 from fastapi import BackgroundTasks
 
 from prism.multi_model.server_args import MultiModelServerArgs
-from sglang.srt.hf_transformers_utils import (
+from sglang.srt.utils.hf_transformers_utils import (
     get_config,
     get_context_length,
     get_processor,

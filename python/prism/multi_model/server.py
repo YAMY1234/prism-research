@@ -35,7 +35,7 @@ from fastapi.responses import JSONResponse, ORJSONResponse, Response, StreamingR
 from uvicorn.config import LOGGING_CONFIG
 
 # SGLang imports
-from sglang.srt.hf_transformers_utils import get_tokenizer
+from sglang.srt.utils.hf_transformers_utils import get_tokenizer
 from sglang.srt.managers.detokenizer_manager import run_detokenizer_process
 from sglang.srt.managers.scheduler import run_scheduler_process
 from sglang.srt.server_args import PortArgs, ServerArgs

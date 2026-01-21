@@ -45,7 +45,7 @@ from fastapi.responses import JSONResponse, ORJSONResponse, Response, StreamingR
 from uvicorn.config import LOGGING_CONFIG
 
 from sglang.lang.backend.runtime_endpoint import RuntimeEndpoint
-from sglang.srt.hf_transformers_utils import get_tokenizer
+from sglang.srt.utils.hf_transformers_utils import get_tokenizer
 from sglang.srt.managers.io_struct import (
     EmbeddingReqInput,
     GenerateReqInput,
