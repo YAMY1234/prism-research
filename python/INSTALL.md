@@ -193,7 +193,7 @@ python benchmark.py -n 1 --base-url http://127.0.0.1:30000
 
 ```bash
 # 启动服务 (8 GPU, 18 模型)
-python -m prism.launch \
+python3 -m prism.launch \
     --model-config-file model_configs/8_gpu_18_model_our.json \
     --port 30333 \
     --enable-worker-pool \
