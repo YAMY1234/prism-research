@@ -36,17 +36,19 @@ from uvicorn.config import LOGGING_CONFIG
 
 # SGLang imports
 from sglang.srt.utils.hf_transformers_utils import get_tokenizer
-from sglang.srt.managers.detokenizer_manager import run_detokenizer_process
-from sglang.srt.managers.scheduler import run_scheduler_process
-from sglang.srt.server_args import PortArgs, ServerArgs
+from sglang.srt.server_args import ServerArgs
+
+# Prism managers (wraps SGLang with multi-model support)
+from prism.multi_model.managers import run_scheduler_process, run_detokenizer_process
+from prism.multi_model.port_args import PrismPortArgs as PortArgs
 from sglang.srt.utils import (
     add_api_key_middleware,
     configure_logger,
     is_port_available,
-    kill_child_process,
-    prepare_model_and_tokenizer,
+    kill_process_tree,
     set_ulimit,
 )
+from prism.utils import prepare_model_and_tokenizer
 from sglang.utils import get_exception_traceback
 
 # Prism imports
@@ -291,14 +293,14 @@ def launch_engine(
         memory_usage = scheduler_pipe_readers[i].recv()
 
     logger.info(
-        f"Model {server_args.model_name} instance {instance_idx} loaded "
+        f"Model {server_args.served_model_name} instance {instance_idx} loaded "
         f"in process {scheduler_procs[-1].pid}"
     )
     
     return EngineInfo(
         port_args=port_args,
         gpu_ids=gpu_ids,
-        model_name=server_args.model_name,
+        model_name=server_args.served_model_name,
         model_path=server_args.model_path,
         instance_idx=instance_idx,
         memory_usage=memory_usage,
@@ -332,7 +334,7 @@ def launch_request_handler(
         )
         if pipe_finish_writer is not None:
             pipe_finish_writer.send(get_exception_traceback())
-        kill_child_process(os.getpid(), including_parent=False)
+        kill_process_tree(os.getpid(), include_parent=False)
         return
 
     # Clear the Redis queue
@@ -515,7 +517,7 @@ def launch_multi_model_server(
             loop="uvloop",
         )
     except Exception as e:
-        kill_child_process(os.getpid(), including_parent=False)
+        kill_process_tree(os.getpid(), include_parent=False)
     finally:
         for t in threads:
             t.join()
@@ -585,7 +587,7 @@ def _launch_model_engines(
     def launch_wrapper(args):
         server_args, port_args, gpu_ids, instance_idx, shared_cpu_models, names_to_paths, engine_id = args
         return (
-            server_args.model_name,
+            server_args.served_model_name,
             launch_engine(
                 server_args=server_args,
                 port_args=port_args,
@@ -611,7 +613,7 @@ def _launch_model_engines(
             gpu_ids = instance_config.gpu_ids
             
             logger.info(
-                f"Preparing engine for {server_args.model_name} on GPU {gpu_ids}"
+                f"Preparing engine for {server_args.served_model_name} on GPU {gpu_ids}"
             )
 
             port_args = PortArgs.init_with_request_handler_ipc_name(
@@ -806,7 +808,7 @@ def _wait_and_warmup(url: str, model_name: str, pipe_finish_writer, pid: int):
         logger.error(f"Server not ready for {model_name}")
         if pipe_finish_writer is not None:
             pipe_finish_writer.send("timeout")
-        kill_child_process(pid, including_parent=False)
+        kill_process_tree(pid, include_parent=False)
         return
 
     # Send a warmup request
@@ -824,7 +826,7 @@ def _wait_and_warmup(url: str, model_name: str, pipe_finish_writer, pid: int):
         logger.error(f"Warmup failed for {model_name}: {e}")
         if pipe_finish_writer is not None:
             pipe_finish_writer.send(str(e))
-        kill_child_process(pid, including_parent=False)
+        kill_process_tree(pid, include_parent=False)
         return
 
     logger.info(f"Server for {model_name} is ready!")

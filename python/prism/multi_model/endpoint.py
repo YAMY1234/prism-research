@@ -49,22 +49,20 @@ from sglang.srt.utils.hf_transformers_utils import get_tokenizer
 from sglang.srt.managers.io_struct import (
     EmbeddingReqInput,
     GenerateReqInput,
-    RewardReqInput,
-    UpdateWeightReqInput,
 )
-from sglang.srt.managers.tokenizer_manager import RequestHandler
+from sglang.srt.managers.tokenizer_manager import TokenizerManager
 from prism.utils.redis_utils import RedisClient
-from sglang.srt.server_args import PortArgs, ServerArgs
+from sglang.srt.server_args import ServerArgs
+from prism.multi_model.port_args import PrismPortArgs as PortArgs
 from sglang.srt.utils import (
     add_api_key_middleware,
     assert_pkg_version,
     configure_logger,
     is_port_available,
-    kill_child_process,
-    maybe_set_triton_cache_manager,
-    prepare_model_and_tokenizer,
+    kill_process_tree,
     set_ulimit,
 )
+from prism.utils import prepare_model_and_tokenizer
 from sglang.utils import get_exception_traceback
 
 logger = logging.getLogger(__name__)
@@ -166,21 +164,11 @@ async def get_memory_pool_size():
         )
 
 
-@app.post("/update_weights")
-async def update_weights(obj: UpdateWeightReqInput, request: Request):
-    """Update the weights inplace without re-launching the server."""
-    success, message = await tokenizer_manager.update_weights(obj, request)
-    content = {"success": success, "message": message}
-    if success:
-        return ORJSONResponse(
-            content,
-            status_code=HTTPStatus.OK,
-        )
-    else:
-        return ORJSONResponse(
-            content,
-            status_code=HTTPStatus.BAD_REQUEST,
-        )
+# NOTE: /update_weights endpoint removed - not supported in new SGLang version
+# @app.post("/update_weights")
+# async def update_weights(obj: UpdateWeightReqInput, request: Request):
+#     """Update the weights inplace without re-launching the server."""
+#     pass
 
 
 # fastapi implicitly converts json in the request to obj (dataclass)
@@ -235,19 +223,12 @@ app.post("/encode")(encode_request)
 app.put("/encode")(encode_request)
 
 
-async def judge_request(obj: RewardReqInput, request: Request):
-    """Handle a reward model request."""
-    try:
-        ret = await tokenizer_manager.generate_request(obj, request).__anext__()
-        return ret
-    except ValueError as e:
-        return ORJSONResponse(
-            {"error": {"message": str(e)}}, status_code=HTTPStatus.BAD_REQUEST
-        )
-
-
-app.post("/judge")(judge_request)
-app.put("/judge")(judge_request)
+# NOTE: /judge endpoint removed - RewardReqInput not supported in new SGLang version
+# async def judge_request(obj: RewardReqInput, request: Request):
+#     """Handle a reward model request."""
+#     pass
+# app.post("/judge")(judge_request)
+# app.put("/judge")(judge_request)
 
 
 def launch_engine(
@@ -274,7 +255,7 @@ def launch_engine(
     )
 
     # Launch tokenizer process
-    tokenizer_manager = RequestHandler(server_args, port_args)
+    tokenizer_manager = TokenizerManager(server_args, port_args)
 
 
 def launch_endpoint(
@@ -297,7 +278,7 @@ def launch_endpoint(
         )
         if pipe_finish_writer is not None:
             pipe_finish_writer.send(get_exception_traceback())
-        kill_child_process(os.getpid(), including_parent=False)
+        kill_process_tree(os.getpid(), include_parent=False)
 
     # clear the redis queue
     redis_client.clear_queue()
@@ -335,7 +316,7 @@ def launch_endpoint(
         logger.error(f"Error: {e}")
         if pipe_finish_writer is not None:
             pipe_finish_writer.send(get_exception_traceback())
-        kill_child_process(os.getpid(), including_parent=False)
+        kill_process_tree(os.getpid(), include_parent=False)
 
     # finally:
     #     t.join()
@@ -351,11 +332,6 @@ def _set_envs_and_config(server_args: ServerArgs):
 
     # Set ulimit
     set_ulimit()
-
-    # Fix triton bugs
-    if server_args.tp_size * server_args.dp_size > 1:
-        # FIXME: remove this after https://github.com/triton-lang/triton/pull/4295 is used as a dependency.
-        maybe_set_triton_cache_manager()
 
     # Check flashinfer version
     if server_args.attention_backend == "flashinfer":
@@ -426,7 +402,7 @@ class Runtime:
 
     def shutdown(self):
         if self.pid is not None:
-            kill_child_process(self.pid)
+            kill_process_tree(self.pid)
             self.pid = None
 
     def cache_prefix(self, prefix: str):
@@ -643,7 +619,7 @@ class Engine:
             return ret
 
     def shutdown(self):
-        kill_child_process(os.getpid(), including_parent=False)
+        kill_process_tree(os.getpid(), include_parent=False)
 
     def get_tokenizer(self):
         global tokenizer_manager

@@ -92,6 +92,24 @@ def apply_server_args_patch():
             return ServerArgs(**args_dict)
         else:
             # Instance mode - use instance_config values
+            # Calculate mem_fraction_static from max_memory_pool_size if specified
+            if instance_config.max_memory_pool_size is not None:
+                # max_memory_pool_size is in GB, convert to fraction
+                # Assume ~280GB GPU memory, add buffer for model weights (~15GB for 3B model)
+                import torch
+                if torch.cuda.is_available():
+                    gpu_mem_gb = torch.cuda.get_device_properties(0).total_memory / (1024**3)
+                else:
+                    gpu_mem_gb = 280  # Default estimate
+                # mem_fraction_static = (model_weights + kv_cache) / total_gpu_mem
+                # For small models, estimate model weights as ~5GB per billion params
+                # max_memory_pool_size is the KV cache size
+                estimated_model_size = 15  # Conservative estimate in GB
+                target_memory = instance_config.max_memory_pool_size + estimated_model_size
+                args_dict['mem_fraction_static'] = min(0.95, target_memory / gpu_mem_gb)
+                logger.info(f"Setting mem_fraction_static={args_dict['mem_fraction_static']:.3f} "
+                           f"for max_memory_pool_size={instance_config.max_memory_pool_size}GB")
+            
             return ServerArgs(
                 model_path=instance_config.model_path,
                 tokenizer_path=instance_config.tokenizer_path,

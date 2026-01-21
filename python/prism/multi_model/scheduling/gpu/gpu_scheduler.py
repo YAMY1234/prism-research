@@ -24,8 +24,9 @@ from prism.io_struct import (
     DeactivateReqOutput,
 )
 from prism.utils.redis_utils import RedisClient
-from sglang.srt.utils import configure_logger, kill_parent_process
-from sglang.utils import cleanup_zmq_ipc, get_exception_traceback
+from sglang.srt.utils import configure_logger, kill_itself_when_parent_died
+from prism.utils import cleanup_zmq_ipc
+from sglang.utils import get_exception_traceback
 
 logger = logging.getLogger(__name__)
 
@@ -482,4 +483,4 @@ def run_gpu_scheduler_process(
         logger.error(msg)
         if gpu_scheduler:
             gpu_scheduler.shutdown()
-        kill_parent_process()
+        kill_itself_when_parent_died()

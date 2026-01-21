@@ -11,7 +11,7 @@ from prism.io_struct import (
     DeactivateReqInput,
     DeactivateReqOutput,
 )
-from sglang.utils import cleanup_zmq_ipc
+from prism.utils import cleanup_zmq_ipc
 
 logger = logging.getLogger(__name__)
 

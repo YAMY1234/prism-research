@@ -35,7 +35,7 @@ from prism.io_struct import (
     MemoryUsage,
     UpdateModelTput,
 )
-from sglang.srt.utils import configure_logger, kill_parent_process, get_available_gpu_memory
+from sglang.srt.utils import configure_logger, kill_itself_when_parent_died, get_available_gpu_memory
 from sglang.utils import get_exception_traceback
 
 AIOHTTP_TIMEOUT = aiohttp.ClientTimeout(total=AIOHTTP_TIMEOUT_SECONDS)
@@ -582,4 +582,4 @@ def run_controller_process(
         logger.error(msg)
         if controller:
             controller.shutdown()
-        kill_parent_process()
+        kill_itself_when_parent_died()

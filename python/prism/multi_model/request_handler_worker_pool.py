@@ -40,26 +40,25 @@ from sglang.srt.utils.hf_transformers_utils import (
     get_processor,
     get_tokenizer,
 )
-from sglang.srt.managers.image_processor import (
-    get_dummy_image_processor,
-    get_image_processor,
-)
+# NOTE: image_processor moved in new SGLang - these functions removed
+# from sglang.srt.managers.image_processor import (
+#     get_dummy_image_processor,
+#     get_image_processor,
+# )
 from sglang.srt.managers.io_struct import (
     AbortReq,
-    BatchEmbeddingOut,
-    BatchStrOut,
-    BatchTokenIDOut,
+    BatchEmbeddingOutput as BatchEmbeddingOut,
+    BatchStrOutput as BatchStrOut,
+    BatchTokenIDOutput as BatchTokenIDOut,
     EmbeddingReqInput,
-    FlushCacheReq,
+    FlushCacheReqInput as FlushCacheReq,
     GenerateReqInput,
-    ProfileReq,
-    RewardReqInput,
+    ProfileReqInput as ProfileReq,
     TokenizedEmbeddingReqInput,
     TokenizedGenerateReqInput,
-    TokenizedRewardReqInput,
-    UpdateWeightReqInput,
-    UpdateWeightReqOutput,
 )
+# NOTE: These classes removed in new SGLang
+# RewardReqInput, TokenizedRewardReqInput, UpdateWeightReqInput, UpdateWeightReqOutput
 from prism.io_struct import (
     ActivateReqInput,
     ActivateReqOutput,
@@ -77,8 +76,9 @@ from prism.io_struct import (
 from prism.utils.redis_utils import AsyncRedisClient
 from sglang.srt.sampling.sampling_params import SamplingParams
 from sglang.srt.server_args import PortArgs
-from sglang.srt.utils import is_generation_model, is_multimodal_model
-from sglang.utils import cleanup_zmq_ipc, get_exception_traceback
+from sglang.srt.configs.model_config import is_generation_model, is_multimodal_model
+from prism.utils import cleanup_zmq_ipc
+from sglang.utils import get_exception_traceback
 
 asyncio.set_event_loop_policy(uvloop.EventLoopPolicy())
 
@@ -245,7 +245,7 @@ class RequestHandlerWorkerPool:
 
     async def generate_request(
         self,
-        obj: Union[GenerateReqInput, EmbeddingReqInput, RewardReqInput],
+        obj: Union[GenerateReqInput, EmbeddingReqInput],
         request: Optional[fastapi.Request] = None,
     ):
         if self.to_create_loop:
@@ -267,7 +267,7 @@ class RequestHandlerWorkerPool:
 
     async def _send_single_request(
         self,
-        obj: Union[GenerateReqInput, EmbeddingReqInput, RewardReqInput],
+        obj: Union[GenerateReqInput, EmbeddingReqInput],
         index: Optional[int] = None,
         input_id_index: Optional[int] = None,
         is_cache_for_prefill: Optional[bool] = False,
@@ -391,7 +391,7 @@ class RequestHandlerWorkerPool:
 
     async def _handle_single_request(
         self,
-        obj: Union[GenerateReqInput, EmbeddingReqInput, RewardReqInput],
+        obj: Union[GenerateReqInput, EmbeddingReqInput],
         request: Optional[fastapi.Request] = None,
         index: Optional[int] = None,
         input_id_index: Optional[int] = None,
@@ -423,7 +423,7 @@ class RequestHandlerWorkerPool:
 
     async def _handle_batch_request(
         self,
-        obj: Union[GenerateReqInput, EmbeddingReqInput, RewardReqInput],
+        obj: Union[GenerateReqInput, EmbeddingReqInput],
         request: Optional[fastapi.Request] = None,
     ):
         batch_size = obj.batch_size
@@ -513,7 +513,7 @@ class RequestHandlerWorkerPool:
     async def _wait_for_response(
         self,
         state: ReqState,
-        obj: Union[GenerateReqInput, EmbeddingReqInput, RewardReqInput],
+        obj: Union[GenerateReqInput, EmbeddingReqInput],
         rid: str,
         request: Optional[fastapi.Request] = None,
         index: Optional[int] = None,
@@ -540,7 +540,7 @@ class RequestHandlerWorkerPool:
                     ),
                     obj.return_text_in_logprobs,
                 )
-            else:  # isinstance(obj, (EmbeddingReqInput, RewardReqInput))
+            else:  # isinstance(obj, EmbeddingReqInput)
                 out = state.out_list[-1]
 
             out["index"] = response_index
@@ -702,7 +702,6 @@ class RequestHandlerWorkerPool:
                 BatchStrOut,
                 BatchEmbeddingOut,
                 BatchTokenIDOut,
-                UpdateWeightReqOutput,
                 GetMemPoolSizeReqOutput,
                 ActivateReqOutput,
                 DeactivateReqOutput,
@@ -710,10 +709,7 @@ class RequestHandlerWorkerPool:
                 UpdateModelTput,
             ] = await self.recv_from_detokenizer.recv_pyobj()
 
-            if isinstance(recv_obj, UpdateWeightReqOutput):
-                self.model_update_result.set_result(recv_obj)
-                continue
-            elif isinstance(recv_obj, GetMemPoolSizeReqOutput):
+            if isinstance(recv_obj, GetMemPoolSizeReqOutput):
                 self.mem_pool_size.set_result(recv_obj)
                 continue
             elif isinstance(recv_obj, UpdateModelTput):

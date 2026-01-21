@@ -50,40 +50,24 @@ from sglang.srt.utils.hf_transformers_utils import get_tokenizer
 from sglang.srt.managers.data_parallel_controller import (
     run_data_parallel_controller_process,
 )
-from sglang.srt.managers.detokenizer_manager import run_detokenizer_process
+from prism.multi_model.managers import run_detokenizer_process
 from sglang.srt.managers.io_struct import (
     EmbeddingReqInput,
     GenerateReqInput,
-    RewardReqInput,
-    UpdateWeightReqInput,
 )
-from sglang.srt.managers.scheduler import run_scheduler_process
-from sglang.srt.managers.tokenizer_manager import RequestHandler
-from sglang.srt.openai_api.adapter import (
-    load_chat_template_for_openai_api,
-    v1_batches,
-    v1_cancel_batch,
-    v1_chat_completions,
-    v1_completions,
-    v1_delete_file,
-    v1_embeddings,
-    v1_files_create,
-    v1_retrieve_batch,
-    v1_retrieve_file,
-    v1_retrieve_file_content,
-)
-from sglang.srt.openai_api.protocol import ModelCard, ModelList
-from sglang.srt.server_args import PortArgs, ServerArgs
+from prism.multi_model.managers import run_scheduler_process
+from sglang.srt.managers.tokenizer_manager import TokenizerManager
+from sglang.srt.server_args import ServerArgs
+from prism.multi_model.port_args import PrismPortArgs as PortArgs
 from sglang.srt.utils import (
     add_api_key_middleware,
     assert_pkg_version,
     configure_logger,
     is_port_available,
-    kill_child_process,
-    maybe_set_triton_cache_manager,
-    prepare_model_and_tokenizer,
+    kill_process_tree,
     set_ulimit,
 )
+from prism.utils import prepare_model_and_tokenizer
 from sglang.utils import get_exception_traceback
 
 logger = logging.getLogger(__name__)
@@ -224,11 +208,6 @@ def _set_envs_and_config(server_args: ServerArgs):
     # Set ulimit
     set_ulimit()
 
-    # Fix triton bugs
-    if server_args.tp_size * server_args.dp_size > 1:
-        # FIXME: remove this after https://github.com/triton-lang/triton/pull/4295 is used as a dependency.
-        maybe_set_triton_cache_manager()
-
     # Check flashinfer version
     if server_args.attention_backend == "flashinfer":
         assert_pkg_version(
@@ -265,7 +244,7 @@ def _wait_and_warmup(server_args, pipe_finish_writer, pid):
     #     if pipe_finish_writer is not None:
     #         pipe_finish_writer.send(last_traceback)
     #     logger.error(f"Initialization failed. warmup error: {last_traceback}")
-    #     kill_child_process(pid, including_parent=False)
+    #     kill_process_tree(pid, include_parent=False)
     #     return
 
     # model_info = res.json()
@@ -300,7 +279,7 @@ def _wait_and_warmup(server_args, pipe_finish_writer, pid):
         if pipe_finish_writer is not None:
             pipe_finish_writer.send(last_traceback)
         logger.error(f"Initialization failed. warmup error: {last_traceback}")
-        kill_child_process(pid, including_parent=False)
+        kill_process_tree(pid, include_parent=False)
         return
 
     # logger.info(f"{res.json()=}")
@@ -366,7 +345,7 @@ class Runtime:
 
     def shutdown(self):
         if self.pid is not None:
-            kill_child_process(self.pid)
+            kill_process_tree(self.pid)
             self.pid = None
 
     def cache_prefix(self, prefix: str):
@@ -583,7 +562,7 @@ class Engine:
             return ret
 
     def shutdown(self):
-        kill_child_process(os.getpid(), including_parent=False)
+        kill_process_tree(os.getpid(), include_parent=False)
 
     def get_tokenizer(self):
         global tokenizer_manager
