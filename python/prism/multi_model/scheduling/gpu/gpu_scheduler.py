@@ -80,6 +80,9 @@ class GPUScheduler:
         self._init_model_states(engine_info_dict)
         logger.info(f"Model states init: {self._model_states}")
 
+        # Note: Requests are sent to schedulers via Redis backend queue
+        # Scheduler will read from Redis using backend_generate_request_key_prefix
+
         self._maybe_init_worker_pool()
         self.resource_manager = ResourceManager(
             gpu_id,
@@ -340,13 +343,15 @@ class GPUScheduler:
             )
 
     def _send_to_backend_queue(self, reqs: Dict[str, List[GenerateReqInput]]):
-        """Send requests to backend queue."""
-        for model_name, reqs in reqs.items():
-            for req in reqs:
-                self.redis_client.send_pyobj(
-                    key=f"{self.server_args.backend_generate_request_key_prefix}:{model_name}",
-                    obj=req,
-                )
+        """Send requests to backend queue via Redis (original Prism design)."""
+        for model_name, model_reqs in reqs.items():
+            for req in model_reqs:
+                key = f"{self.server_args.backend_generate_request_key_prefix}:{model_name}"
+                logger.info(f"[DEBUG] GPU_Scheduler sending request rid={req.rid} to key={key}")
+                self.redis_client.send_pyobj(key=key, obj=req)
+                # Verify it was added
+                queue_len = self.redis_client.get_queue_length(key)
+                logger.info(f"[DEBUG] GPU_Scheduler sent request, queue length now={queue_len}")
 
     def _init_model_states(self, engine_info_dict: Dict[str, List]):
         """
@@ -454,7 +459,6 @@ def run_gpu_scheduler_process(
     configure_logger(
         multi_model_server_args,
         prefix=f" GPU_Scheduler_{gpu_id}",
-        log_file_suffix="gpu_scheduler",
     )
     logger.info(f"starting GPU scheduler for GPU {gpu_id}")
 

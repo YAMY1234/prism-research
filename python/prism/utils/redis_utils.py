@@ -66,7 +66,10 @@ class AsyncRedisClient:
 
 
 class RedisClient:
-    """Synchronous Redis client for blocking operations."""
+    """Synchronous Redis client for blocking operations.
+    
+    Matches prism-old implementation exactly.
+    """
 
     def __init__(self, host: str, port: int, db: int):
         self.host = host
@@ -80,9 +83,8 @@ class RedisClient:
             try:
                 self.client.close()
             except Exception:
-                pass  # Ignore errors during close
+                pass
         self.client = redis.Redis(host=self.host, port=self.port, db=self.db)
-        # Test connection
         self.client.ping()
 
     def clear_queue(self):

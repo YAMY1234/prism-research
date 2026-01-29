@@ -37,6 +37,7 @@ from uvicorn.config import LOGGING_CONFIG
 # SGLang imports
 from sglang.srt.utils.hf_transformers_utils import get_tokenizer
 from sglang.srt.server_args import ServerArgs
+from prism.io_struct import GenerateReqInput, EmbeddingReqInput
 
 # Prism managers (wraps SGLang with multi-model support)
 from prism.multi_model.managers import run_scheduler_process, run_detokenizer_process
@@ -158,10 +159,8 @@ async def resize_mem_pool(obj: ResizeMemPoolReqInput):
     return Response(status_code=200)
 
 
-async def generate_request(obj, request: Request):
+async def generate_request(obj: GenerateReqInput, request: Request):
     """Handle a generate request."""
-    # Import here to avoid circular imports
-    from sglang.srt.managers.io_struct import GenerateReqInput
     
     if obj.stream:
         async def stream_results() -> AsyncIterator[bytes]:
@@ -339,6 +338,11 @@ def launch_request_handler(
 
     # Clear the Redis queue
     redis_client.clear_queue()
+    
+    # CRITICAL: Close Redis connection before forking child processes
+    # Python redis library may share connection state across forks if not closed
+    redis_client.close()
+    del redis_client
 
     global request_handler
     
@@ -637,17 +641,21 @@ def _launch_model_engines(
         all_results = list(executor.map(launch_wrapper, engine_launch_args))
 
     # Process results
+    init_placements = defaultdict(list)
     for model_name, engine_info in all_results:
         engine_info_dict[model_name].append(engine_info)
         port_args_dict[model_name].append(engine_info.port_args)
         num_engines += 1
         gpu_id = engine_info.gpu_ids[0]
         gpu_id_to_model_instance[gpu_id][model_name] = engine_info.instance_idx
+        # Build init_placements: {gpu_id: [model_names]}
+        if engine_info.on:
+            init_placements[gpu_id].append(model_name)
 
     logger.info(
         f"All {num_engines} engines prepared in {time.perf_counter() - start_time:.2f} seconds."
     )
-    return engine_info_dict, port_args_dict, gpu_id_to_model_instance, num_engines, None
+    return engine_info_dict, port_args_dict, gpu_id_to_model_instance, num_engines, dict(init_placements)
 
 
 def _launch_worker_pool_engines(
@@ -769,7 +777,7 @@ def _launch_gpu_scheduler(
     init_model_names: List[str],
 ):
     """Launch a GPU scheduler process."""
-    from prism.multi_model.scheduling.gpu.scheduler import run_gpu_scheduler_process
+    from prism.multi_model.scheduling.gpu.gpu_scheduler import run_gpu_scheduler_process
     
     reader, writer = mp.Pipe(duplex=False)
     gpu_scheduler_proc = mp.Process(

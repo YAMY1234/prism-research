@@ -42,18 +42,34 @@ class ResourceManager:
     def _init_shared_memory_readers(self):
         """Initialize shared memory readers."""
         self.username = getpass.getuser()
+        self._shm_available = False  # Track if shared memory is available
+        
         if self.enable_worker_pool:
             self._worker_to_mem_reader = {}
             for worker_id in range(self.num_workers):
-                self._worker_to_mem_reader[worker_id] = MemoryUsageReader(
-                    f"ipc_{self.gpu_id}_{worker_id}_{self.username}"
-                )
+                try:
+                    self._worker_to_mem_reader[worker_id] = MemoryUsageReader(
+                        f"ipc_{self.gpu_id}_{worker_id}_{self.username}"
+                    )
+                    self._shm_available = True
+                except (FileNotFoundError, Exception) as e:
+                    warnings.warn(
+                        f"Failed to connect to shared memory for worker {worker_id}: {e}. "
+                        "Memory tracking will be estimated."
+                    )
         else:
             self._model_name_to_shm = {}
             for model_name in self.active_model_names:
-                self._model_name_to_shm[model_name] = shared_memory.SharedMemory(
-                    f"ipc_{self.gpu_id}_{model_name}_{self.username}"
-                )
+                try:
+                    self._model_name_to_shm[model_name] = shared_memory.SharedMemory(
+                        f"ipc_{self.gpu_id}_{model_name}_{self.username}"
+                    )
+                    self._shm_available = True
+                except FileNotFoundError:
+                    warnings.warn(
+                        f"Shared memory ipc_{self.gpu_id}_{model_name}_{self.username} not found. "
+                        "Memory tracking will be estimated using torch.cuda."
+                    )
 
     def get_total_usable_gpu_memory(self):
         """Get total usable GPU memory in GB."""
@@ -95,12 +111,22 @@ class ResourceManager:
 
     def get_total_used_kv_cache_memory(self):
         """Get total used KV cache memory in bytes."""
+        if not self._shm_available:
+            # Fallback: estimate using torch.cuda
+            try:
+                import torch
+                allocated = torch.cuda.memory_allocated(self.gpu_id)
+                return allocated
+            except Exception:
+                return 0
+        
         if self.enable_worker_pool:
             used_sum = 0
             for worker_id in range(self.num_workers):
-                used_sum += self._worker_to_mem_reader[
-                    worker_id
-                ].get_memory_usage_in_bytes()
+                if worker_id in self._worker_to_mem_reader:
+                    used_sum += self._worker_to_mem_reader[
+                        worker_id
+                    ].get_memory_usage_in_bytes()
             return used_sum
         else:
             used_sum = 0
@@ -141,12 +167,20 @@ class ResourceManager:
             self._model_names_to_weights_memory = {}
             for model_name, engine_info_list in engine_info_dict.items():
                 engine_info = engine_info_list[0]
-                self._model_names_to_req_to_token_pool_memory[model_name] = (
-                    engine_info.memory_usage.req_to_token_pool_memory
-                )
-                self._model_names_to_weights_memory[model_name] = (
-                    engine_info.memory_usage.model_weights_memory
-                )
+                # Handle case where memory_usage might be None (new SGLang compatibility)
+                if engine_info.memory_usage is not None:
+                    self._model_names_to_req_to_token_pool_memory[model_name] = (
+                        engine_info.memory_usage.req_to_token_pool_memory
+                    )
+                    self._model_names_to_weights_memory[model_name] = (
+                        engine_info.memory_usage.model_weights_memory
+                    )
+                else:
+                    # Estimate memory usage from model_info.json
+                    model_path = self.model_names_to_model_paths.get(model_name, model_name)
+                    model_sizes = get_model_path_to_model_size([model_path])
+                    self._model_names_to_weights_memory[model_name] = model_sizes.get(model_path, 6.0)
+                    self._model_names_to_req_to_token_pool_memory[model_name] = 0.25  # Default estimate
         else:
             self._model_names_to_req_to_token_pool_memory = {
                 model_name: 0.25

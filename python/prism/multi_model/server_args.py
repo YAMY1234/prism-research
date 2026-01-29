@@ -185,6 +185,7 @@ class MultiModelServerArgs:
     # Prism-specific options
     enable_elastic_memory: bool = False
     use_kvcached_v0: bool = True
+    virtual_memory_size_gb: float = 50.0  # Virtual memory size for kvcached
     enable_cpu_share_memory: bool = False
     enable_model_service: bool = False
     num_model_service_workers: int = 1

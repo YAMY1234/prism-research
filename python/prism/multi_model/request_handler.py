@@ -50,16 +50,17 @@ from sglang.srt.managers.io_struct import (
     BatchEmbeddingOutput as BatchEmbeddingOut,
     BatchStrOutput as BatchStrOut,
     BatchTokenIDOutput as BatchTokenIDOut,
-    EmbeddingReqInput,
     FlushCacheReqInput as FlushCacheReq,
-    GenerateReqInput,
     ProfileReqInput as ProfileReq,
     TokenizedEmbeddingReqInput,
     TokenizedGenerateReqInput,
 )
 # NOTE: These classes removed in new SGLang
 # RewardReqInput, TokenizedRewardReqInput, UpdateWeightReqInput, UpdateWeightReqOutput
+# Use Prism extended versions with model field for multi-model support
 from prism.io_struct import (
+    GenerateReqInput,
+    EmbeddingReqInput,
     ActivateReqInput,
     ActivateReqOutput,
     DeactivateReqInput,
@@ -239,7 +240,11 @@ class RequestHandler:
                 "This model does not appear to be an embedding model by default. Please add `--is-embedding` when launching the server or try another model."
             )
 
-        obj.post_init()
+        # Set arrival time for GPU scheduler priority calculation
+        if not hasattr(obj, 'arrival_time') or obj.arrival_time is None:
+            obj.arrival_time = time.time()
+
+        obj.normalize_batch_and_arguments()
         is_single = obj.is_single
         if is_single:
             async for response in self._handle_single_request(obj, request):

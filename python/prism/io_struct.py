@@ -10,9 +10,55 @@ They are used for model activation/deactivation and multi-model scheduling.
 
 import dataclasses
 import uuid
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from enum import Enum
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Union
+
+from sglang.srt.managers.io_struct import GenerateReqInput as SGLangGenerateReqInput
+from sglang.srt.managers.io_struct import EmbeddingReqInput as SGLangEmbeddingReqInput
+
+
+@dataclass
+class GenerateReqInput(SGLangGenerateReqInput):
+    """Extended GenerateReqInput with Prism multi-model support."""
+    
+    # Model name for multi-model routing (required for Prism)
+    model: Optional[str] = None
+    # SLO deadline for scheduling (seconds from arrival_time)
+    slo: Optional[float] = None
+    # Whether this is a warmup request
+    is_warmup: bool = False
+    # Request arrival time for scheduling
+    arrival_time: Optional[float] = None
+    
+    def get_prompt_len(self) -> int:
+        """Estimate prompt length from text or input_ids."""
+        if self.input_ids is not None:
+            if isinstance(self.input_ids, list):
+                if len(self.input_ids) > 0 and isinstance(self.input_ids[0], int):
+                    return len(self.input_ids)
+                elif len(self.input_ids) > 0:
+                    return len(self.input_ids[0])
+            return 0
+        elif self.text is not None:
+            if isinstance(self.text, str):
+                # Rough estimate: ~4 chars per token
+                return len(self.text) // 4
+            elif isinstance(self.text, list) and len(self.text) > 0:
+                return len(self.text[0]) // 4
+        return 0
+
+
+@dataclass  
+class EmbeddingReqInput(SGLangEmbeddingReqInput):
+    """Extended EmbeddingReqInput with Prism multi-model support."""
+    
+    # Model name for multi-model routing
+    model: Optional[str] = None
+    # SLO deadline for scheduling
+    slo: Optional[float] = None
+    # Whether this is a warmup request
+    is_warmup: bool = False
 
 
 @dataclass
@@ -202,6 +248,8 @@ class UpdateModelTput:
 
 # Export all
 __all__ = [
+    "GenerateReqInput",
+    "EmbeddingReqInput",
     "MemoryUsage",
     "PreemptMode",
     "ActivateReqInput",

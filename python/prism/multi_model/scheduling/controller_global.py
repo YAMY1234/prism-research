@@ -554,7 +554,7 @@ def run_controller_process(
     """Run the global controller process."""
     controller = None
     configure_logger(
-        server_args, prefix=" GlobalController", log_file_suffix="global_controller"
+        server_args, prefix=" GlobalController"
     )
 
     try:

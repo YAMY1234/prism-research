@@ -48,8 +48,18 @@ def apply_all_patches():
         apply_server_args_patch()
         logger.debug("Server args patch applied.")
         
-        # Phase 3: Memory pool patches are optional (used via inheritance)
-        # MHATokenToKVPoolElastic is available as a new class, not a patch
+        # Phase 3: Apply TpModelWorker patches (activate/deactivate support)
+        from prism.patches.tp_worker_patch import apply_tp_worker_patch
+        apply_tp_worker_patch()
+        logger.debug("TpModelWorker patch applied.")
+        
+        # Phase 4: Apply ModelRunner patches (elastic memory via kvcached)
+        from prism.patches.model_runner_patch import apply_model_runner_patch
+        apply_model_runner_patch()
+        logger.debug("ModelRunner patch applied.")
+        
+        # Phase 5: Memory pool patches are optional (used via inheritance)
+        # MHATokenToKVPoolElastic is available as a new class
         
         _patches_applied = True
         logger.info("Prism patches applied successfully!")
@@ -62,3 +72,8 @@ def apply_all_patches():
 def is_patches_applied() -> bool:
     """Check if patches have been applied."""
     return _patches_applied
+
+
+# Auto-apply patches on import
+# This ensures patches are applied when any module imports prism.patches
+apply_all_patches()

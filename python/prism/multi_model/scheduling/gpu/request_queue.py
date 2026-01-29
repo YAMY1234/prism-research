@@ -5,7 +5,7 @@ import time
 from collections import defaultdict
 from typing import Dict, List, Set
 
-from sglang.srt.managers.io_struct import GenerateReqInput
+from prism.io_struct import GenerateReqInput
 
 logger = logging.getLogger(__name__)
 
@@ -14,20 +14,30 @@ class RequestWrapper:
     """Request wrapper for encapsulating requests and calculating priorities."""
     
     def __init__(self, req: GenerateReqInput):
-        self.model_name = req.model
+        self.model_name = getattr(req, 'model', None)
         self.priority = self._calculate_priority(req)  # Lower value means higher priority (min-heap)
         self.req = req
 
     def _calculate_priority(self, req: GenerateReqInput):
-        """Calculate request priority."""
+        """Calculate request priority based on SLO deadline."""
         def clamp(x, lower, upper):
             return max(lower, min(x, upper))
 
-        profiled_prefill_time = (
-            req.prompt_len * (0.5 / 1024) if req.prompt_len is not None else 0.5
-        )
+        # Get prompt length using helper method or estimate
+        if hasattr(req, 'get_prompt_len'):
+            prompt_len = req.get_prompt_len()
+        else:
+            prompt_len = 0
+        
+        # Estimate prefill time based on prompt length
+        profiled_prefill_time = prompt_len * (0.5 / 1024) if prompt_len > 0 else 0.5
         profiled_prefill_time = clamp(profiled_prefill_time, 0.2, 2)
-        return req.arrival_time + req.slo - profiled_prefill_time
+        
+        # Get arrival time and SLO, use defaults if not set
+        arrival_time = getattr(req, 'arrival_time', None) or time.time()
+        slo = getattr(req, 'slo', None) or 10.0  # Default 10 second SLO
+        
+        return arrival_time + slo - profiled_prefill_time
 
     def __lt__(self, other):
         return self.priority < other.priority  # Heap uses this for comparison
@@ -203,8 +213,15 @@ class RequestQueue:
         Calculate how many resources (memory) the request needs.
         Simplified calculation: (input_len + 20) * cell_size
         """
-        cell_size = self._model_name_to_cell_size[req.model]
-        input_len = req.prompt_len
+        model_name = getattr(req, 'model', None)
+        cell_size = self._model_name_to_cell_size.get(model_name, 114688)  # Default cell size
+        
+        # Use get_prompt_len() method if available
+        if hasattr(req, 'get_prompt_len'):
+            input_len = req.get_prompt_len()
+        else:
+            input_len = 0
+        
         if input_len is None or input_len == 0:
             input_len = 1024  # Default value from profiled data
         return cell_size * (input_len + 20)

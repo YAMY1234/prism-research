@@ -16,12 +16,20 @@ from prism.multi_model.scheduling.state import (
     ModelInstanceState,
     get_gpu_memory_usage,
 )
-from prism.multi_model.scheduling.action import SchedulerAction
+from prism.multi_model.scheduling.action import (
+    BaseAction,
+    ActivateAction,
+    DeactivateAction,
+    ResizeAction,
+)
 from prism.multi_model.scheduling.constants import *
 
 __all__ = [
     "ModelState",
     "ModelInstanceState",
     "get_gpu_memory_usage",
-    "SchedulerAction",
+    "BaseAction",
+    "ActivateAction",
+    "DeactivateAction",
+    "ResizeAction",
 ]

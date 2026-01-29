@@ -40,6 +40,7 @@ def apply_scheduler_patch():
         return
     
     from sglang.srt.managers.scheduler import Scheduler
+    from sglang.srt.managers.io_struct import TokenizedGenerateReqInput
     
     # Import Prism data structures
     from prism.io_struct import (
@@ -47,6 +48,7 @@ def apply_scheduler_patch():
         ActivateReqOutput,
         DeactivateReqInput,
         DeactivateReqOutput,
+        GenerateReqInput,
         GetMemoryUsageReq,
         GetMemoryUsageReqOutput,
         GetMemPoolSizeReq,
@@ -55,7 +57,7 @@ def apply_scheduler_patch():
         ResizeMemPoolReqInput,
     )
     
-    # Save original init_request_dispatcher
+    # Save original methods (only what we actually patch)
     _original_init_request_dispatcher = Scheduler.init_request_dispatcher
     
     def patched_init_request_dispatcher(self):
@@ -70,6 +72,8 @@ def apply_scheduler_patch():
         self._request_dispatcher._mapping[GetMemPoolSizeReq] = self._prism_handle_get_mem_pool_size
         self._request_dispatcher._mapping[GetMemoryUsageReq] = self._prism_handle_get_memory_usage
         self._request_dispatcher._mapping[ResizeMemPoolReqInput] = self._prism_handle_resize_mem_pool
+        # Handle raw GenerateReqInput from GPU scheduler (needs tokenization)
+        self._request_dispatcher._mapping[GenerateReqInput] = self._prism_handle_raw_generate_request
         
         logger.debug("Prism request handlers registered to Scheduler dispatcher.")
     
@@ -216,8 +220,72 @@ def apply_scheduler_patch():
         
         return None  # No response needed
     
+    def _prism_handle_raw_generate_request(self, recv_req: GenerateReqInput):
+        """
+        Handle raw GenerateReqInput from GPU scheduler.
+        
+        This method tokenizes the request and converts it to TokenizedGenerateReqInput
+        before passing it to the standard generate request handler.
+        """
+        logger.info(f"[DEBUG] Scheduler received raw GenerateReqInput rid={recv_req.rid}, model={getattr(recv_req, 'model', None)}")
+        
+        try:
+            logger.info(f"[DEBUG] Request has text={recv_req.text is not None}, input_ids={recv_req.input_ids is not None}")
+            # Get text or input_ids
+            if recv_req.input_ids is not None:
+                if isinstance(recv_req.input_ids, list) and len(recv_req.input_ids) > 0:
+                    if isinstance(recv_req.input_ids[0], int):
+                        input_ids = recv_req.input_ids
+                    else:
+                        input_ids = recv_req.input_ids[0]
+                else:
+                    input_ids = recv_req.input_ids
+            elif recv_req.text is not None:
+                # Tokenize text using scheduler's tokenizer
+                text = recv_req.text if isinstance(recv_req.text, str) else recv_req.text[0]
+                if hasattr(self, 'tokenizer') and self.tokenizer is not None:
+                    input_ids = self.tokenizer.encode(text)
+                else:
+                    logger.error("No tokenizer available for text tokenization")
+                    return
+            else:
+                logger.error("No text or input_ids in request")
+                return
+            
+            # Get sampling params
+            sampling_params = recv_req.sampling_params
+            if isinstance(sampling_params, list):
+                sampling_params = sampling_params[0] if len(sampling_params) > 0 else {}
+            if isinstance(sampling_params, dict):
+                from sglang.srt.sampling.sampling_params import SamplingParams
+                sampling_params = SamplingParams.from_dict(sampling_params)
+            
+            # Create TokenizedGenerateReqInput
+            tokenized_req = TokenizedGenerateReqInput(
+                rid=recv_req.rid,
+                input_text=recv_req.text if isinstance(recv_req.text, str) else (recv_req.text[0] if recv_req.text else ""),
+                input_ids=input_ids,
+                mm_inputs={},  # No multimodal inputs for now
+                sampling_params=sampling_params,
+                return_logprob=getattr(recv_req, 'return_logprob', False),
+                logprob_start_len=getattr(recv_req, 'logprob_start_len', 0),
+                top_logprobs_num=getattr(recv_req, 'top_logprobs_num', 0),
+                stream=getattr(recv_req, 'stream', False),
+                lora_path=getattr(recv_req, 'lora_path', None),
+            )
+            
+            # Call the standard generate request handler
+            logger.info(f"[DEBUG] Scheduler calling handle_generate_request for rid={recv_req.rid}")
+            self.handle_generate_request(tokenized_req)
+            logger.info(f"[DEBUG] Scheduler finished handle_generate_request for rid={recv_req.rid}")
+            
+        except Exception as e:
+            logger.error(f"[DEBUG] Prism: Failed to handle raw generate request rid={recv_req.rid}: {e}")
+            import traceback
+            logger.error(traceback.format_exc())
+    
     def _prism_get_memory_usage(self) -> MemoryUsage:
-        """Get current memory usage."""
+        """Get current memory usage and update shared memory for GPU scheduler."""
         try:
             import torch
             
@@ -226,9 +294,14 @@ def apply_scheduler_patch():
                 gpu_id = getattr(self, 'gpu_id', 0)
                 total_memory = torch.cuda.get_device_properties(gpu_id).total_memory / (1024**3)
                 allocated = torch.cuda.memory_allocated(gpu_id) / (1024**3)
+                allocated_bytes = torch.cuda.memory_allocated(gpu_id)
             else:
                 total_memory = 0.0
                 allocated = 0.0
+                allocated_bytes = 0
+            
+            # Update shared memory for GPU scheduler
+            self._prism_update_memory_usage_shm(allocated_bytes)
             
             # Estimate component sizes
             model_weights = getattr(self, '_prism_model_weights_memory', 0.0)
@@ -249,6 +322,15 @@ def apply_scheduler_patch():
                 req_to_token_pool_memory=0.0,
                 token_to_kv_pool_memory=0.0,
             )
+    
+    def _prism_update_memory_usage_shm(self, memory_bytes: int):
+        """Update shared memory with current memory usage for GPU scheduler."""
+        try:
+            mem_array = getattr(self, '_prism_memory_usage_array', None)
+            if mem_array is not None:
+                mem_array[0] = memory_bytes
+        except Exception as e:
+            logger.debug(f"Failed to update memory usage shared memory: {e}")
     
     def _prism_handle_preemption(self, preempt_mode):
         """Handle request preemption during deactivation."""
@@ -275,14 +357,128 @@ def apply_scheduler_patch():
         # For now, just log
         pass
     
+    def _prism_recv_generation_requests(self):
+        """
+        Receive generation requests from Redis backend queue.
+        
+        This is the Prism extension - pip-installed SGLang doesn't have this.
+        GPU scheduler sends requests to Redis, scheduler reads from here.
+        """
+        recv_reqs = []
+        
+        # Only tp_rank == 0 should read from Redis
+        if getattr(self, 'tp_rank', 0) != 0:
+            return recv_reqs
+        
+        # Check if activated
+        if not getattr(self, '_activated', True):
+            return recv_reqs
+        
+        # Get Redis client (created in managers.py)
+        redis_client = getattr(self, 'redis_client', None)
+        if redis_client is None:
+            return recv_reqs
+        
+        # Get model name and backend key prefix
+        model_name = getattr(self, 'model_name', None)
+        server_args = getattr(self, 'server_args', None)
+        if not model_name or not server_args:
+            return recv_reqs
+        
+        backend_key_prefix = getattr(server_args, 'backend_generate_request_key_prefix', None)
+        if not backend_key_prefix:
+            return recv_reqs
+        
+        key = f"{backend_key_prefix}:{model_name}"
+        
+        try:
+            # Non-blocking read from Redis queue
+            recv_reqs = redis_client.recv_pyobj_non_block(key=key, count=32)
+            if recv_reqs:
+                logger.info(f"Prism: Received {len(recv_reqs)} generation requests from Redis for {model_name}")
+        except Exception as e:
+            logger.warning(f"Prism: Redis recv error for {model_name}: {e}")
+        
+        return recv_reqs
+    
+    # Save original event_loop_normal
+    _original_event_loop_normal = Scheduler.event_loop_normal
+    
+    def patched_event_loop_normal(self):
+        """
+        Patched event loop that adds Redis support for Prism multi-model serving.
+        
+        pip-installed SGLang doesn't have recv_generation_requests(), so we add it here.
+        This polls both ZMQ (for control messages) and Redis (for generation requests).
+        """
+        import time as time_module
+        
+        model_name = getattr(self, 'model_name', 'unknown')
+        logger.info(f"Prism: {model_name} event_loop_normal STARTED")
+        
+        self.last_batch = None
+        
+        while True:
+            # Step 1: Receive requests from tokenizer (ZMQ) - uses zmq.NOBLOCK internally
+            recv_reqs = []
+            if hasattr(self, 'recv_requests'):
+                recv_reqs = self.recv_requests()
+            
+            # Step 2: Receive generation requests from Redis (Prism extension)
+            redis_reqs = self._prism_recv_generation_requests()
+            if redis_reqs:
+                # Process each raw request through our handler
+                for req in redis_reqs:
+                    self._prism_handle_raw_generate_request(req)
+            
+            # Step 3: Process ZMQ requests
+            if recv_reqs:
+                self.process_input_requests(recv_reqs)
+            
+            # Step 4: Run batch if activated
+            if getattr(self, '_activated', True):
+                batch = self.get_next_batch_to_run()
+                
+                if batch:
+                    result = self.run_batch(batch)
+                    self.process_batch_result(batch, result)
+                    
+                    # Decode multiple steps
+                    if hasattr(batch, 'forward_mode') and batch.forward_mode.is_decode():
+                        num_steps = getattr(self.server_args, 'num_continuous_decode_steps', 1) - 1
+                        for _ in range(num_steps):
+                            if not self.running_batch:
+                                break
+                            self.update_running_batch()
+                            if not self.running_batch:
+                                break
+                            result = self.run_batch(batch)
+                            self.process_batch_result(batch, result)
+                else:
+                    # No batch to run - brief sleep to avoid busy loop
+                    time_module.sleep(0.001)
+                    if hasattr(self, 'check_memory'):
+                        self.check_memory()
+                
+                self.last_batch = batch
+            else:
+                # Not activated - sleep
+                time_module.sleep(0.001)
+    
     # Apply patches to Scheduler class
+    # IMPORTANT: We MUST patch event_loop_normal because pip-installed SGLang
+    # doesn't have recv_generation_requests() for Redis support.
     Scheduler.init_request_dispatcher = patched_init_request_dispatcher
+    Scheduler.event_loop_normal = patched_event_loop_normal
+    Scheduler._prism_recv_generation_requests = _prism_recv_generation_requests
     Scheduler._prism_handle_activate_request = _prism_handle_activate_request
     Scheduler._prism_handle_deactivate_request = _prism_handle_deactivate_request
     Scheduler._prism_handle_get_mem_pool_size = _prism_handle_get_mem_pool_size
     Scheduler._prism_handle_get_memory_usage = _prism_handle_get_memory_usage
     Scheduler._prism_handle_resize_mem_pool = _prism_handle_resize_mem_pool
+    Scheduler._prism_handle_raw_generate_request = _prism_handle_raw_generate_request
     Scheduler._prism_get_memory_usage = _prism_get_memory_usage
+    Scheduler._prism_update_memory_usage_shm = _prism_update_memory_usage_shm
     Scheduler._prism_handle_preemption = _prism_handle_preemption
     Scheduler._prism_run_to_completion = _prism_run_to_completion
     

@@ -8,11 +8,18 @@ This module provides custom run_scheduler_process and run_detokenizer_process
 functions that wrap SGLang's managers with Prism's multi-model extensions.
 """
 
+# IMPORTANT: Import prism.patches FIRST to apply scheduler patch before Scheduler is imported
+import prism.patches  # noqa: F401 - side effect: applies Prism patches to SGLang
+
+import atexit
+import getpass
 import logging
 import os
 import signal
+from multiprocessing import shared_memory
 from typing import Dict, List, Optional
 
+import numpy as np
 import psutil
 import setproctitle
 import torch
@@ -32,6 +39,44 @@ from sglang.utils import get_exception_traceback
 from prism.multi_model.port_args import PrismPortArgs
 
 logger = logging.getLogger(__name__)
+
+
+def create_memory_usage_shm(gpu_id: int, model_name: str) -> shared_memory.SharedMemory:
+    """
+    Create shared memory for reporting memory usage to GPU scheduler.
+    
+    The shared memory stores an int64 value representing memory usage in bytes.
+    Name format: ipc_{gpu_id}_{model_name}_{username}
+    """
+    username = getpass.getuser()
+    shm_name = f"ipc_{gpu_id}_{model_name}_{username}"
+    
+    # Try to clean up any existing shared memory with the same name
+    try:
+        old_shm = shared_memory.SharedMemory(name=shm_name)
+        old_shm.close()
+        old_shm.unlink()
+    except FileNotFoundError:
+        pass
+    
+    # Create new shared memory (8 bytes for int64)
+    shm = shared_memory.SharedMemory(name=shm_name, create=True, size=8)
+    
+    # Initialize to 0
+    mem_array = np.ndarray((1,), dtype=np.int64, buffer=shm.buf)
+    mem_array[0] = 0
+    
+    logger.info(f"Created shared memory {shm_name} for memory usage tracking")
+    return shm
+
+
+def cleanup_memory_usage_shm(shm: shared_memory.SharedMemory):
+    """Clean up shared memory on exit."""
+    try:
+        shm.close()
+        shm.unlink()
+    except Exception as e:
+        logger.debug(f"Failed to cleanup shared memory: {e}")
 
 
 def run_scheduler_process(
@@ -80,23 +125,24 @@ def run_scheduler_process(
     suppress_other_loggers()
 
     try:
-        # Convert PrismPortArgs to standard PortArgs format expected by new SGLang
+        # Convert PrismPortArgs to SGLang's PortArgs format
+        # pip-installed SGLang PortArgs: (tokenizer_ipc_name, scheduler_input_ipc_name, detokenizer_ipc_name, 
+        #                                  nccl_port, rpc_ipc_name, metrics_ipc_name, tokenizer_worker_ipc_name)
         from sglang.srt.server_args import PortArgs as SGLangPortArgs
         import tempfile
         
-        # Create a compatible PortArgs for new SGLang
         sglang_port_args = SGLangPortArgs(
-            tokenizer_ipc_name=f"ipc://{port_args.request_handler_ipc_name}",
-            scheduler_input_ipc_name=f"ipc://{port_args.scheduler_input_ipc_name}",
-            detokenizer_ipc_name=f"ipc://{port_args.detokenizer_ipc_name}",
+            tokenizer_ipc_name=port_args.request_handler_ipc_name,  # Map to tokenizer_ipc_name
+            scheduler_input_ipc_name=port_args.scheduler_input_ipc_name,
+            detokenizer_ipc_name=port_args.detokenizer_ipc_name,
             nccl_port=port_args.nccl_port,
-            rpc_ipc_name=f"ipc://{tempfile.NamedTemporaryFile(delete=False).name}",
-            metrics_ipc_name=f"ipc://{tempfile.NamedTemporaryFile(delete=False).name}",
+            rpc_ipc_name=tempfile.NamedTemporaryFile(delete=False).name,
+            metrics_ipc_name=tempfile.NamedTemporaryFile(delete=False).name,
             tokenizer_worker_ipc_name=None,
         )
         
-        # Initialize scheduler with standard SGLang parameters
-        # Note: Prism's extra parameters (shared_cpu_models, etc.) are handled via patches
+        # Initialize scheduler with pip-installed SGLang parameters
+        # pip SGLang Scheduler signature: (server_args, port_args, gpu_id, tp_rank, moe_ep_rank, pp_rank, dp_rank)
         scheduler = Scheduler(
             server_args,
             sglang_port_args,
@@ -107,25 +153,70 @@ def run_scheduler_process(
             dp_rank,
         )
         
+        # Store WorkerPool parameters as attributes (prism-old style)
+        scheduler.model_names_to_model_paths = model_names_to_model_paths
+        scheduler.engine_id = engine_id
+        scheduler.input_queue = input_queue
+        scheduler.output_queue = output_queue
+        
+        # Create shared memory for memory usage tracking (for GPU scheduler)
+        memory_usage_shm = create_memory_usage_shm(gpu_id, model_name)
+        atexit.register(cleanup_memory_usage_shm, memory_usage_shm)
+        
         # Store prism-specific data in scheduler for patch access
         scheduler._prism_shared_cpu_models = shared_cpu_models
         scheduler._prism_model_names_to_paths = model_names_to_model_paths
         scheduler._prism_engine_id = engine_id
         scheduler._prism_input_queue = input_queue
         scheduler._prism_output_queue = output_queue
+        scheduler._prism_gpu_id = gpu_id
+        scheduler._prism_model_name = model_name
+        scheduler._prism_memory_usage_shm = memory_usage_shm
+        scheduler._prism_memory_usage_array = np.ndarray((1,), dtype=np.int64, buffer=memory_usage_shm.buf)
+        
+        # pip-installed SGLang doesn't have redis_client - we need to create it
+        # This is the Prism extension for multi-model serving via Redis
+        from prism.utils.redis_utils import RedisClient
+        backend_key = getattr(server_args, 'backend_generate_request_key_prefix', None)
+        
+        if tp_rank == 0:
+            redis_host = getattr(server_args, 'redis_host', 'localhost')
+            redis_port = getattr(server_args, 'redis_port', 6379)
+            redis_db = getattr(server_args, 'redis_db', 0)
+            scheduler.redis_client = RedisClient(redis_host, redis_port, redis_db)
+            scheduler.model_name = model_name  # Needed for recv_generation_requests
+            logger.info(f"Prism: Created Redis client for model {model_name}, backend_key_prefix={backend_key}")
+        else:
+            scheduler.redis_client = None
+        
+        # Ensure model is activated so recv_generation_requests() is called
+        scheduler._activated = True
+        logger.info(f"Prism: Activated scheduler for {model_name}")
+        
+        # Disable idle_sleeper if present (shouldn't be needed now but keep for safety)
+        if hasattr(scheduler, 'idle_sleeper') and scheduler.idle_sleeper is not None:
+            scheduler.idle_sleeper = None
+            logger.info(f"Prism: Disabled idle_sleeper for {model_name}")
         
         # Send memory usage back through pipe
-        if hasattr(scheduler, 'get_memory_usage'):
-            mem_usage = scheduler.get_memory_usage()
+        # Use Prism's patched method to get memory usage
+        if hasattr(scheduler, '_prism_get_memory_usage'):
+            mem_usage = scheduler._prism_get_memory_usage()
         else:
             mem_usage = None
         pipe_writer.send(mem_usage)
         
         # Start event loop
+        logger.info(f"Prism: Starting scheduler event loop for {model_name}, overlap={getattr(server_args, 'enable_overlap_schedule', False)}")
+        import sys
+        sys.stdout.flush()
+        sys.stderr.flush()
         if getattr(server_args, 'enable_overlap_schedule', False):
             scheduler.event_loop_overlap()
         else:
             scheduler.event_loop_normal()
+        # This should never be reached
+        logger.error(f"Prism: Scheduler event loop exited unexpectedly for {model_name}!")
             
     except Exception:
         msg = get_exception_traceback()

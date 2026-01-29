@@ -152,25 +152,15 @@ class MHATokenToKVPoolElastic:
         self.cell_size = self.head_num * self.head_dim * self.dtype.itemsize
         
         # Initialize allocator
-        if self.use_kvcached_v0:
-            self.kv_allocator = self.KVCacheManager(
-                self.size,
-                1,
-                self.cell_size,
-                num_layers=self.layer_num,
-                shm=self.shm,
-            )
-            logger.debug("Elastic memory: kv_cache_manager_v0 initialized")
-        else:
-            self.kv_allocator = self.KVCacheManager(
-                self.size,
-                1,
-                self.cell_size,
-                num_layers=self.layer_num,
-                enable_overlap=self.enable_overlap,
-                ipc_name=self.ipc_name,
-            )
-            logger.debug("Elastic memory: kv_cache_manager initialized")
+        # KVCacheManager API: (num_blocks, block_size, cell_size, num_layers, shm)
+        self.kv_allocator = self.KVCacheManager(
+            self.size,
+            1,
+            self.cell_size,
+            num_layers=self.layer_num,
+            shm=self.shm,
+        )
+        logger.debug("Elastic memory: KVCacheManager initialized")
     
     def alloc(self, need_size: int) -> Optional[torch.Tensor]:
         """

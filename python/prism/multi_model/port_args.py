@@ -27,6 +27,9 @@ class PrismPortArgs:
     nccl_port: int
     # The ipc filename for controller to receive inputs from scheduler (zmq)
     controller_ipc_name: Optional[str] = None
+    # The ipc filename for GPU scheduler to send requests to scheduler (zmq)
+    # Scheduler binds, GPU scheduler connects
+    gpu_scheduler_ipc_name: Optional[str] = None
 
     @staticmethod
     def init_new(server_args) -> "PrismPortArgs":
@@ -42,6 +45,7 @@ class PrismPortArgs:
             scheduler_input_ipc_name=tempfile.NamedTemporaryFile(delete=False).name,
             detokenizer_ipc_name=tempfile.NamedTemporaryFile(delete=False).name,
             nccl_port=port,
+            gpu_scheduler_ipc_name=tempfile.NamedTemporaryFile(delete=False).name,
         )
 
     @staticmethod
@@ -63,4 +67,5 @@ class PrismPortArgs:
             detokenizer_ipc_name=tempfile.NamedTemporaryFile(delete=False).name,
             controller_ipc_name=controller_ipc_name,
             nccl_port=port,
+            gpu_scheduler_ipc_name=tempfile.NamedTemporaryFile(delete=False).name,
         )
