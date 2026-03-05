@@ -132,12 +132,12 @@ def run_scheduler_process(
         import tempfile
         
         sglang_port_args = SGLangPortArgs(
-            tokenizer_ipc_name=port_args.request_handler_ipc_name,  # Map to tokenizer_ipc_name
-            scheduler_input_ipc_name=port_args.scheduler_input_ipc_name,
-            detokenizer_ipc_name=port_args.detokenizer_ipc_name,
+            tokenizer_ipc_name=f"ipc://{port_args.request_handler_ipc_name}",
+            scheduler_input_ipc_name=f"ipc://{port_args.scheduler_input_ipc_name}",
+            detokenizer_ipc_name=f"ipc://{port_args.detokenizer_ipc_name}",
             nccl_port=port_args.nccl_port,
-            rpc_ipc_name=tempfile.NamedTemporaryFile(delete=False).name,
-            metrics_ipc_name=tempfile.NamedTemporaryFile(delete=False).name,
+            rpc_ipc_name=f"ipc://{tempfile.NamedTemporaryFile(delete=False).name}",
+            metrics_ipc_name=f"ipc://{tempfile.NamedTemporaryFile(delete=False).name}",
             tokenizer_worker_ipc_name=None,
         )
         
@@ -160,7 +160,10 @@ def run_scheduler_process(
         scheduler.output_queue = output_queue
         
         # Create shared memory for memory usage tracking (for GPU scheduler)
-        memory_usage_shm = create_memory_usage_shm(gpu_id, model_name)
+        # In WorkerPool mode, use worker_id instead of model_name (model_name may contain '/')
+        is_worker_pool = getattr(server_args, 'enable_worker_pool', False)
+        shm_label = str(getattr(server_args, 'worker_id', 0)) if is_worker_pool else model_name
+        memory_usage_shm = create_memory_usage_shm(gpu_id, shm_label)
         atexit.register(cleanup_memory_usage_shm, memory_usage_shm)
         
         # Store prism-specific data in scheduler for patch access
@@ -175,7 +178,6 @@ def run_scheduler_process(
         scheduler._prism_memory_usage_array = np.ndarray((1,), dtype=np.int64, buffer=memory_usage_shm.buf)
         
         # pip-installed SGLang doesn't have redis_client - we need to create it
-        # This is the Prism extension for multi-model serving via Redis
         from prism.utils.redis_utils import RedisClient
         backend_key = getattr(server_args, 'backend_generate_request_key_prefix', None)
         
@@ -184,19 +186,38 @@ def run_scheduler_process(
             redis_port = getattr(server_args, 'redis_port', 6379)
             redis_db = getattr(server_args, 'redis_db', 0)
             scheduler.redis_client = RedisClient(redis_host, redis_port, redis_db)
-            scheduler.model_name = model_name  # Needed for recv_generation_requests
-            logger.info(f"Prism: Created Redis client for model {model_name}, backend_key_prefix={backend_key}")
+            logger.info(f"Prism: Created Redis client, backend_key_prefix={backend_key}")
         else:
             scheduler.redis_client = None
         
-        # Ensure model is activated so recv_generation_requests() is called
-        scheduler._activated = True
-        logger.info(f"Prism: Activated scheduler for {model_name}")
+        # Create ZMQ channel for receiving activate/deactivate from GPU Scheduler
+        # In prism-old, Scheduler binds to ipc://gpu_scheduler_{gpu_id}_to_worker_{worker_id}
+        # WorkerPool or GPU Scheduler connects to this channel to send commands
+        import zmq
+        worker_id = getattr(server_args, 'worker_id', 0)
+        gpu_sched_ipc = f"gpu_scheduler_{gpu_id}_to_worker_{worker_id}"
+        _zmq_ctx = zmq.Context(1)
+        scheduler._prism_recv_from_gpu_scheduler = _zmq_ctx.socket(zmq.PULL)
+        scheduler._prism_recv_from_gpu_scheduler.bind(f"ipc://{gpu_sched_ipc}")
+        logger.info(f"Prism: Bound to {gpu_sched_ipc} for GPU Scheduler commands")
         
-        # Disable idle_sleeper if present (shouldn't be needed now but keep for safety)
+        is_worker_pool = getattr(server_args, 'enable_worker_pool', False)
+        
+        if is_worker_pool:
+            # WorkerPool mode: start deactivated, model_name not yet known
+            scheduler._activated = False
+            scheduler.model_name = None
+            logger.info(f"Prism: Worker {worker_id} on GPU {gpu_id} started (WorkerPool, deactivated)")
+        else:
+            # Non-WorkerPool: start activated with known model
+            scheduler._activated = True
+            scheduler.model_name = model_name
+            logger.info(f"Prism: Activated scheduler for {model_name}")
+        
+        # Disable idle_sleeper if present
         if hasattr(scheduler, 'idle_sleeper') and scheduler.idle_sleeper is not None:
             scheduler.idle_sleeper = None
-            logger.info(f"Prism: Disabled idle_sleeper for {model_name}")
+            logger.info(f"Prism: Disabled idle_sleeper")
         
         # Send memory usage back through pipe
         # Use Prism's patched method to get memory usage

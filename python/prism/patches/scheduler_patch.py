@@ -81,119 +81,198 @@ def apply_scheduler_patch():
         """
         Handle model activation request.
         
-        This activates a model on the specified GPU, loading weights and
-        initializing the KV cache.
+        In WorkerPool mode, this dynamically binds model_name, tokenizer, etc.
+        In non-WorkerPool mode, just activates the already-loaded model.
+        Sends response to both detokenizer and GPU Scheduler (via Redis).
         """
         logger.info(f"Prism: Handling activate request for model={recv_req.model_name}, gpu={recv_req.gpu_id}")
         
-        # Check if already activated
-        if getattr(self, '_prism_activated', True):
+        if getattr(self, '_activated', False):
             logger.warning(f"Model already activated, ignoring request rid={recv_req.rid}")
-            return ActivateReqOutput(
-                rid=recv_req.rid,
-                success=False,
+            output = ActivateReqOutput(
+                rid=recv_req.rid, success=False,
                 memory_usage=self._prism_get_memory_usage(),
                 model_name=recv_req.model_name,
-                instance_idx=recv_req.instance_idx,
-                gpu_id=recv_req.gpu_id,
+                instance_idx=recv_req.instance_idx, gpu_id=recv_req.gpu_id,
             )
+            self._prism_send_activate_response(output)
+            return output
         
         start_time = time.perf_counter()
+        gpu_id = recv_req.gpu_id if recv_req.gpu_id is not None else getattr(self, 'gpu_id', 0)
         
         try:
-            # Activate model runner if available
+            # Activate model runner
             if hasattr(self, 'tp_worker') and hasattr(self.tp_worker, 'activate_model_runner'):
                 self.tp_worker.activate_model_runner(
                     memory_pool_size=recv_req.memory_pool_size,
-                    gpu_id=recv_req.gpu_id,
+                    gpu_id=gpu_id,
                     model_name=recv_req.model_name,
                 )
             
-            # Update state
+            # --- WorkerPool dynamic binding (matching prism-old) ---
+            # Bind model_name so _prism_recv_generation_requests reads the correct Redis key
+            self.model_name = recv_req.model_name
+            
+            # Get tokenizer — needed for _prism_handle_raw_generate_request
+            if getattr(self, 'enable_worker_pool', False) or not hasattr(self, 'tokenizer') or self.tokenizer is None:
+                # WorkerPool or missing tokenizer: get from tp_worker or load fresh
+                if hasattr(self.tp_worker, 'get_tokenizer'):
+                    self.tokenizer = self.tp_worker.get_tokenizer()
+                elif hasattr(self, 'model_names_to_model_paths') and self.model_names_to_model_paths:
+                    model_path = self.model_names_to_model_paths.get(recv_req.model_name)
+                    if model_path:
+                        from sglang.srt.utils.hf_transformers_utils import get_tokenizer
+                        self.tokenizer = get_tokenizer(
+                            model_path,
+                            tokenizer_mode=getattr(self.server_args, 'tokenizer_mode', 'auto'),
+                            trust_remote_code=getattr(self.server_args, 'trust_remote_code', True),
+                        )
+                        logger.info(f"Prism: Loaded tokenizer for {recv_req.model_name}")
+            
+            # Get model_config if available
+            if hasattr(self.tp_worker, 'get_model_config'):
+                self.model_config = self.tp_worker.get_model_config()
+            
+            # Update pad_input_ids_func on first activate
+            if getattr(self, 'first_time_activate', True):
+                if hasattr(self.tp_worker, 'get_pad_input_ids_func'):
+                    self.pad_input_ids_func = self.tp_worker.get_pad_input_ids_func()
+                self.first_time_activate = False
+            
+            # Set activated
+            self._activated = True
             self._prism_activated = True
             
             elapsed = time.perf_counter() - start_time
             logger.info(f"Prism: Model {recv_req.model_name} activated in {elapsed:.2f}s")
             
-            return ActivateReqOutput(
-                rid=recv_req.rid,
-                success=True,
+            output = ActivateReqOutput(
+                rid=recv_req.rid, success=True,
                 memory_usage=self._prism_get_memory_usage(),
                 model_name=recv_req.model_name,
-                instance_idx=recv_req.instance_idx,
-                gpu_id=recv_req.gpu_id,
+                instance_idx=recv_req.instance_idx, gpu_id=gpu_id,
             )
+            self._prism_send_activate_response(output)
+            return output
             
         except Exception as e:
             logger.error(f"Prism: Failed to activate model: {e}")
-            return ActivateReqOutput(
-                rid=recv_req.rid,
-                success=False,
+            import traceback as tb
+            logger.error(tb.format_exc())
+            output = ActivateReqOutput(
+                rid=recv_req.rid, success=False,
                 memory_usage=self._prism_get_memory_usage(),
                 model_name=recv_req.model_name,
-                instance_idx=recv_req.instance_idx,
-                gpu_id=recv_req.gpu_id,
+                instance_idx=recv_req.instance_idx, gpu_id=gpu_id,
             )
+            self._prism_send_activate_response(output)
+            return output
+    
+    def _prism_send_activate_response(self, output: ActivateReqOutput):
+        """Send activate response to detokenizer (ZMQ) and GPU Scheduler (Redis)."""
+        # Send to detokenizer → request_handler
+        if hasattr(self, 'send_to_detokenizer'):
+            try:
+                self.send_to_detokenizer.send_pyobj(output)
+            except Exception as e:
+                logger.warning(f"Prism: Failed to send activate response to detokenizer: {e}")
+        
+        # Send to GPU Scheduler via Redis
+        redis_client = getattr(self, 'redis_client', None)
+        gpu_id = getattr(self, 'gpu_id', 0)
+        engine_key_prefix = getattr(self.server_args, 'engine_to_gpu_scheduler_key_prefix', None)
+        if redis_client and engine_key_prefix:
+            try:
+                redis_client.send_pyobj(
+                    key=f"{engine_key_prefix}:{gpu_id}",
+                    obj=output,
+                )
+            except Exception as e:
+                logger.warning(f"Prism: Failed to send activate response to GPU Scheduler: {e}")
     
     def _prism_handle_deactivate_request(self, recv_req: DeactivateReqInput):
         """
         Handle model deactivation request.
         
-        This deactivates a model, releasing GPU memory for other models.
+        Deactivates the model, releases GPU memory.
+        Sends response to both detokenizer and GPU Scheduler.
         """
         logger.info(f"Prism: Handling deactivate request for model={recv_req.model_name}")
         
-        # Check if already deactivated
-        if not getattr(self, '_prism_activated', True):
+        gpu_id = recv_req.gpu_id if recv_req.gpu_id is not None else getattr(self, 'gpu_id', 0)
+        
+        if not getattr(self, '_activated', False):
             logger.warning(f"Model already deactivated, ignoring request rid={recv_req.rid}")
-            return DeactivateReqOutput(
-                rid=recv_req.rid,
-                success=False,
+            output = DeactivateReqOutput(
+                rid=recv_req.rid, success=False,
                 memory_usage=self._prism_get_memory_usage(),
                 model_name=recv_req.model_name,
-                instance_idx=recv_req.instance_idx,
-                gpu_id=recv_req.gpu_id,
+                instance_idx=recv_req.instance_idx, gpu_id=gpu_id,
             )
+            self._prism_send_deactivate_response(output)
+            return output
         
         start_time = time.perf_counter()
         
         try:
-            # Handle preemption if requested
             if recv_req.preempt:
                 self._prism_handle_preemption(recv_req.preempt_mode)
             else:
-                # Wait for running requests to complete
                 self._prism_run_to_completion()
             
-            # Deactivate model runner if available
+            # Deactivate model runner
             if hasattr(self, 'tp_worker') and hasattr(self.tp_worker, 'deactivate_model_runner'):
                 self.tp_worker.deactivate_model_runner()
             
-            # Update state
+            # Set deactivated
+            self._activated = False
             self._prism_activated = False
             
             elapsed = time.perf_counter() - start_time
             logger.info(f"Prism: Model {recv_req.model_name} deactivated in {elapsed:.2f}s")
             
-            return DeactivateReqOutput(
-                rid=recv_req.rid,
-                success=True,
+            output = DeactivateReqOutput(
+                rid=recv_req.rid, success=True,
                 memory_usage=self._prism_get_memory_usage(),
                 model_name=recv_req.model_name,
-                instance_idx=recv_req.instance_idx,
-                gpu_id=recv_req.gpu_id,
+                instance_idx=recv_req.instance_idx, gpu_id=gpu_id,
             )
+            self._prism_send_deactivate_response(output)
+            return output
             
         except Exception as e:
             logger.error(f"Prism: Failed to deactivate model: {e}")
-            return DeactivateReqOutput(
-                rid=recv_req.rid,
-                success=False,
+            import traceback as tb
+            logger.error(tb.format_exc())
+            output = DeactivateReqOutput(
+                rid=recv_req.rid, success=False,
                 memory_usage=self._prism_get_memory_usage(),
                 model_name=recv_req.model_name,
-                instance_idx=recv_req.instance_idx,
-                gpu_id=recv_req.gpu_id,
+                instance_idx=recv_req.instance_idx, gpu_id=gpu_id,
             )
+            self._prism_send_deactivate_response(output)
+            return output
+    
+    def _prism_send_deactivate_response(self, output: DeactivateReqOutput):
+        """Send deactivate response to detokenizer (ZMQ) and GPU Scheduler (Redis)."""
+        if hasattr(self, 'send_to_detokenizer'):
+            try:
+                self.send_to_detokenizer.send_pyobj(output)
+            except Exception as e:
+                logger.warning(f"Prism: Failed to send deactivate response to detokenizer: {e}")
+        
+        redis_client = getattr(self, 'redis_client', None)
+        gpu_id = getattr(self, 'gpu_id', 0)
+        engine_key_prefix = getattr(self.server_args, 'engine_to_gpu_scheduler_key_prefix', None)
+        if redis_client and engine_key_prefix:
+            try:
+                redis_client.send_pyobj(
+                    key=f"{engine_key_prefix}:{gpu_id}",
+                    obj=output,
+                )
+            except Exception as e:
+                logger.warning(f"Prism: Failed to send deactivate response to GPU Scheduler: {e}")
     
     def _prism_handle_get_mem_pool_size(self, recv_req: GetMemPoolSizeReq):
         """Handle request to get memory pool size."""
@@ -404,66 +483,82 @@ def apply_scheduler_patch():
     # Save original event_loop_normal
     _original_event_loop_normal = Scheduler.event_loop_normal
     
+    import zmq as _zmq_module
+    _ZMQ_NOBLOCK = _zmq_module.NOBLOCK
+    _ZMQ_ERROR = _zmq_module.ZMQError
+    
+    def _prism_recv_gpu_scheduler_requests(self):
+        """Receive activate/deactivate requests from GPU Scheduler via ZMQ (non-blocking)."""
+        recv_reqs = []
+        sock = getattr(self, '_prism_recv_from_gpu_scheduler', None)
+        if sock is None:
+            return recv_reqs
+        try:
+            while True:
+                try:
+                    req = sock.recv_pyobj(_ZMQ_NOBLOCK)
+                    recv_reqs.append(req)
+                except _ZMQ_ERROR:
+                    break
+        except Exception as e:
+            logger.error(f"Prism: _prism_recv_gpu_scheduler_requests error: {e}")
+        return recv_reqs
+    
     def patched_event_loop_normal(self):
-        """
-        Patched event loop that adds Redis support for Prism multi-model serving.
-        
-        pip-installed SGLang doesn't have recv_generation_requests(), so we add it here.
-        This polls both ZMQ (for control messages) and Redis (for generation requests).
-        """
-        import time as time_module
-        
-        model_name = getattr(self, 'model_name', 'unknown')
-        logger.info(f"Prism: {model_name} event_loop_normal STARTED")
-        
+        import time as _t
+        _name = getattr(self, 'model_name', None) or 'unassigned'
+        logger.info(f"Prism: {_name} event_loop_normal STARTED")
         self.last_batch = None
-        
+        _n = 0
+        _tl = _t.time()
+        print(f"[PRISM-DBG] {_name} about to enter while True", flush=True)
         while True:
-            # Step 1: Receive requests from tokenizer (ZMQ) - uses zmq.NOBLOCK internally
-            recv_reqs = []
-            if hasattr(self, 'recv_requests'):
-                recv_reqs = self.recv_requests()
-            
-            # Step 2: Receive generation requests from Redis (Prism extension)
-            redis_reqs = self._prism_recv_generation_requests()
-            if redis_reqs:
-                # Process each raw request through our handler
-                for req in redis_reqs:
-                    self._prism_handle_raw_generate_request(req)
-            
-            # Step 3: Process ZMQ requests
-            if recv_reqs:
-                self.process_input_requests(recv_reqs)
-            
-            # Step 4: Run batch if activated
-            if getattr(self, '_activated', True):
-                batch = self.get_next_batch_to_run()
-                
-                if batch:
-                    result = self.run_batch(batch)
-                    self.process_batch_result(batch, result)
-                    
-                    # Decode multiple steps
-                    if hasattr(batch, 'forward_mode') and batch.forward_mode.is_decode():
-                        num_steps = getattr(self.server_args, 'num_continuous_decode_steps', 1) - 1
-                        for _ in range(num_steps):
-                            if not self.running_batch:
-                                break
-                            self.update_running_batch()
-                            if not self.running_batch:
-                                break
-                            result = self.run_batch(batch)
-                            self.process_batch_result(batch, result)
+            _n += 1
+            if _n <= 2:
+                print(f"[PRISM-DBG] {_name} loop iter {_n} begin", flush=True)
+            try:
+                _tn = _t.time()
+                if _tn - _tl >= 3.0:
+                    _tl = _tn
+                    print(f"[{_name}] loop#{_n} act={getattr(self,'_activated','?')}", flush=True)
+                gs = self._prism_recv_gpu_scheduler_requests()
+                if gs:
+                    logger.info(f"Prism: Got {len(gs)} GPU Scheduler reqs")
+                    self.process_input_requests(gs)
+                if getattr(self, '_activated', False):
+                    if hasattr(self, 'recv_requests'):
+                        rr = self.recv_requests()
+                        if rr:
+                            self.process_input_requests(rr)
+                    rq = self._prism_recv_generation_requests()
+                    if rq:
+                        for r in rq:
+                            self._prism_handle_raw_generate_request(r)
+                    b = self.get_next_batch_to_run()
+                    if b:
+                        res = self.run_batch(b)
+                        self.process_batch_result(b, res)
+                        if hasattr(b, 'forward_mode') and b.forward_mode.is_decode():
+                            for _ in range(getattr(self.server_args, 'num_continuous_decode_steps', 1) - 1):
+                                if not self.running_batch:
+                                    break
+                                self.update_running_batch()
+                                if not self.running_batch:
+                                    break
+                                res = self.run_batch(b)
+                                self.process_batch_result(b, res)
+                    else:
+                        _t.sleep(0.001)
+                        if hasattr(self, 'check_memory'):
+                            self.check_memory()
+                    self.last_batch = b
                 else:
-                    # No batch to run - brief sleep to avoid busy loop
-                    time_module.sleep(0.001)
-                    if hasattr(self, 'check_memory'):
-                        self.check_memory()
-                
-                self.last_batch = batch
-            else:
-                # Not activated - sleep
-                time_module.sleep(0.001)
+                    _t.sleep(0.001)
+            except Exception as e:
+                print(f"[{_name}] LOOP ERR #{_n}: {e}", flush=True)
+                import traceback
+                traceback.print_exc()
+                _t.sleep(1.0)
     
     # Apply patches to Scheduler class
     # IMPORTANT: We MUST patch event_loop_normal because pip-installed SGLang
@@ -471,8 +566,11 @@ def apply_scheduler_patch():
     Scheduler.init_request_dispatcher = patched_init_request_dispatcher
     Scheduler.event_loop_normal = patched_event_loop_normal
     Scheduler._prism_recv_generation_requests = _prism_recv_generation_requests
+    Scheduler._prism_recv_gpu_scheduler_requests = _prism_recv_gpu_scheduler_requests
     Scheduler._prism_handle_activate_request = _prism_handle_activate_request
     Scheduler._prism_handle_deactivate_request = _prism_handle_deactivate_request
+    Scheduler._prism_send_activate_response = _prism_send_activate_response
+    Scheduler._prism_send_deactivate_response = _prism_send_deactivate_response
     Scheduler._prism_handle_get_mem_pool_size = _prism_handle_get_mem_pool_size
     Scheduler._prism_handle_get_memory_usage = _prism_handle_get_memory_usage
     Scheduler._prism_handle_resize_mem_pool = _prism_handle_resize_mem_pool

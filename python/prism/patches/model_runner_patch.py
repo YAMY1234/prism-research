@@ -82,6 +82,34 @@ def apply_model_runner_patch():
         # Save original methods
         _original_init_memory_pool = ModelRunnerKVCacheMixin.init_memory_pool
         _original_profile_max_num_token = ModelRunnerKVCacheMixin.profile_max_num_token
+        _original_initialize = ModelRunner.initialize
+        
+        class _WorkerPoolInitDone(Exception):
+            """Sentinel exception to break out of initialize() after init_memory_pool in WorkerPool mode."""
+            pass
+        
+        def patched_initialize(self, min_per_gpu_memory: int = 0):
+            """
+            Patched initialize for WorkerPool mode.
+            
+            Strategy: let original initialize run normally (model loading, etc.),
+            but our patched init_memory_pool raises _WorkerPoolInitDone to skip
+            the post-memory-pool steps (attention backend, cuda graphs, etc.)
+            that depend on memory pool objects.
+            """
+            is_worker_pool = getattr(self.server_args, 'enable_worker_pool', False)
+            enable_elastic = getattr(self.server_args, 'enable_elastic_memory', False)
+            
+            if not (is_worker_pool and enable_elastic):
+                return _original_initialize(self, min_per_gpu_memory)
+            
+            try:
+                self._prism_worker_pool_init = True
+                _original_initialize(self, min_per_gpu_memory)
+            except _WorkerPoolInitDone:
+                logger.info("Prism: WorkerPool initialize complete (deferred memory pool)")
+            finally:
+                self._prism_worker_pool_init = False
         
         def patched_init_memory_pool(self: ModelRunner, total_gpu_memory: int):
             """
@@ -92,8 +120,26 @@ def apply_model_runner_patch():
             enable_elastic = getattr(self.server_args, 'enable_elastic_memory', False)
             
             if not enable_elastic:
-                # Use original implementation
                 return _original_init_memory_pool(self, total_gpu_memory)
+            
+            # WorkerPool mode: set placeholders and bail out of initialize()
+            if getattr(self, '_prism_worker_pool_init', False):
+                logger.info("Prism: WorkerPool mode — deferring KV cache init until activate")
+                # Placeholder values large enough to pass TpModelWorker assertions
+                # Real values will be set when activate command initializes memory pool
+                _placeholder = 8192
+                self.max_total_num_tokens = _placeholder
+                self.max_prefill_tokens = _placeholder
+                self.max_running_requests = 16
+                self.max_req_input_len = _placeholder
+                # Stub pools with attributes that TpModelWorker.get_worker_info() reads
+                from types import SimpleNamespace
+                self.req_to_token_pool = SimpleNamespace(size=16, max_context_len=8192)
+                self.token_to_kv_pool = SimpleNamespace(size=_placeholder, available_size=lambda: 0)
+                self.token_to_kv_pool_allocator = None
+                self.graph_runner = None
+                self.graph_mem_usage = 0
+                raise _WorkerPoolInitDone()
             
             logger.info("Prism: Using elastic memory pool with kvcached")
             
@@ -235,7 +281,8 @@ def apply_model_runner_patch():
                 f"avail mem={get_available_gpu_memory(self.device, self.gpu_id):.2f} GB"
             )
         
-        # Apply the patch
+        # Apply patches
+        ModelRunner.initialize = patched_initialize
         ModelRunnerKVCacheMixin.init_memory_pool = patched_init_memory_pool
         
         _patch_applied = True
