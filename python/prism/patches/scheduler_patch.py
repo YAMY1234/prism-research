@@ -511,17 +511,25 @@ def apply_scheduler_patch():
         self.last_batch = None
         _n = 0
         _tl = _t.time()
-        print(f"[PRISM-DBG] {_name} about to enter while True", flush=True)
+        import os as _os
+        _pid = _os.getpid()
+        _dbg_path = f"/tmp/prism_worker_{_pid}.log"
+        def _dbg(msg):
+            with open(_dbg_path, "a") as f:
+                f.write(f"{_t.time():.3f} [{_name}] {msg}\n")
+        _dbg(f"entering while True, activated={getattr(self,'_activated','?')}")
         while True:
             _n += 1
-            if _n <= 2:
-                print(f"[PRISM-DBG] {_name} loop iter {_n} begin", flush=True)
             try:
                 _tn = _t.time()
                 if _tn - _tl >= 3.0:
                     _tl = _tn
                     print(f"[{_name}] loop#{_n} act={getattr(self,'_activated','?')}", flush=True)
+                if _n <= 5 or _n % 1000 == 0:
+                    _dbg(f"loop#{_n} begin")
                 gs = self._prism_recv_gpu_scheduler_requests()
+                if _n <= 5:
+                    _dbg(f"loop#{_n} gpu_sched={len(gs)}")
                 if gs:
                     logger.info(f"Prism: Got {len(gs)} GPU Scheduler reqs")
                     self.process_input_requests(gs)

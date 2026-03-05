@@ -196,8 +196,8 @@ def run_scheduler_process(
         import zmq
         worker_id = getattr(server_args, 'worker_id', 0)
         gpu_sched_ipc = f"gpu_scheduler_{gpu_id}_to_worker_{worker_id}"
-        _zmq_ctx = zmq.Context(1)
-        scheduler._prism_recv_from_gpu_scheduler = _zmq_ctx.socket(zmq.PULL)
+        scheduler._prism_zmq_ctx = zmq.Context(1)  # Store ref to prevent GC
+        scheduler._prism_recv_from_gpu_scheduler = scheduler._prism_zmq_ctx.socket(zmq.PULL)
         scheduler._prism_recv_from_gpu_scheduler.bind(f"ipc://{gpu_sched_ipc}")
         logger.info(f"Prism: Bound to {gpu_sched_ipc} for GPU Scheduler commands")
         
