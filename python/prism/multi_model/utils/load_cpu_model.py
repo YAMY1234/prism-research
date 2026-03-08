@@ -13,7 +13,11 @@ from vllm.model_executor.model_loader import get_model
 
 from sglang.srt.configs.model_config import ModelConfig
 from sglang.srt.server_args import ServerArgs
-from sglang.srt.utils import is_port_available, monkey_patch_vllm_dummy_weight_loader
+from sglang.srt.utils import is_port_available
+try:
+    from sglang.srt.utils import monkey_patch_vllm_dummy_weight_loader
+except ImportError:
+    monkey_patch_vllm_dummy_weight_loader = None
 
 
 def init_torch_distributed_tp_1(device="cpu"):
@@ -81,7 +85,8 @@ def load_shared_cpu_model(server_args: ServerArgs):
     torch.set_num_threads(1)
 
     # Prepare the vllm model config
-    monkey_patch_vllm_dummy_weight_loader()
+    if monkey_patch_vllm_dummy_weight_loader is not None:
+        monkey_patch_vllm_dummy_weight_loader()
     load_config = LoadConfig(load_format=server_args.load_format)
     vllm_model_config = VllmModelConfig(
         model=server_args.model_path,

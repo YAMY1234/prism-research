@@ -55,13 +55,16 @@ from prism.utils.redis_utils import RedisClient
 from sglang.srt.server_args import ServerArgs
 from prism.multi_model.port_args import PrismPortArgs as PortArgs
 from sglang.srt.utils import (
-    add_api_key_middleware,
     assert_pkg_version,
     configure_logger,
     is_port_available,
     kill_process_tree,
     set_ulimit,
 )
+try:
+    from sglang.srt.utils.auth import add_api_key_middleware
+except ImportError:
+    from sglang.srt.utils import add_api_key_middleware
 from prism.utils import prepare_model_and_tokenizer
 from sglang.utils import get_exception_traceback
 

@@ -11,10 +11,11 @@ from vllm.distributed import init_distributed_environment, initialize_model_para
 from vllm.model_executor.model_loader import get_model
 
 from sglang.srt.configs.model_config import ModelConfig
-from sglang.srt.utils import (
-    get_available_gpu_memory,
-    monkey_patch_vllm_dummy_weight_loader,
-)
+from sglang.srt.utils import get_available_gpu_memory
+try:
+    from sglang.srt.utils import monkey_patch_vllm_dummy_weight_loader
+except ImportError:
+    monkey_patch_vllm_dummy_weight_loader = None
 
 
 def init_torch_distributed():
@@ -34,7 +35,8 @@ def init_torch_distributed():
 def load_model(model_path):
     # Prepare the vllm model config
     available_memory_start = get_available_gpu_memory(device="cuda", gpu_id=0)
-    monkey_patch_vllm_dummy_weight_loader()
+    if monkey_patch_vllm_dummy_weight_loader is not None:
+        monkey_patch_vllm_dummy_weight_loader()
     load_config = LoadConfig(load_format="auto")
     vllm_model_config = VllmModelConfig(
         model=model_path,

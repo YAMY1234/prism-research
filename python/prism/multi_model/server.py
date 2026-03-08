@@ -43,12 +43,15 @@ from prism.io_struct import GenerateReqInput, EmbeddingReqInput
 from prism.multi_model.managers import run_scheduler_process, run_detokenizer_process
 from prism.multi_model.port_args import PrismPortArgs as PortArgs
 from sglang.srt.utils import (
-    add_api_key_middleware,
     configure_logger,
     is_port_available,
     kill_process_tree,
     set_ulimit,
 )
+try:
+    from sglang.srt.utils.auth import add_api_key_middleware
+except ImportError:
+    from sglang.srt.utils import add_api_key_middleware
 from prism.utils import prepare_model_and_tokenizer
 from sglang.utils import get_exception_traceback
 
