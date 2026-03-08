@@ -99,6 +99,13 @@ def run_scheduler_process(
     """
     kill_itself_when_parent_died()
     
+    # Debug: check if setattr'd Prism attrs survived pickle across mp.Process
+    _bkp = getattr(server_args, 'backend_generate_request_key_prefix', 'MISSING_AFTER_PICKLE')
+    _em = getattr(server_args, 'enable_elastic_memory', 'MISSING_AFTER_PICKLE')
+    import sys
+    sys.stderr.write(f"[run_scheduler_process] backend_key_prefix={_bkp}, enable_elastic_memory={_em}\n")
+    sys.stderr.flush()
+    
     # Set process title for identification
     model_name = getattr(server_args, 'served_model_name', None) or getattr(server_args, 'model_name', 'unknown')
     setproctitle.setproctitle(f"sglang::scheduler::{model_name}")
