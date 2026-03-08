@@ -77,6 +77,12 @@ def apply_server_args_patch():
             "engine_to_gpu_scheduler_key_prefix",
         }
         
+        # Debug: log the key prefix from source
+        _bkp = getattr(multi_model_server_args, 'backend_generate_request_key_prefix', 'MISSING')
+        _qid = getattr(multi_model_server_args, 'queue_id', 'MISSING')
+        _ic_name = getattr(instance_config, 'model_name', None) if instance_config else f'worker_{worker_id}'
+        logger.info(f"from_multi_model_server_args({_ic_name}): queue_id={_qid}, backend_key={_bkp}")
+        
         # Save Prism-specific values before removing
         prism_extra_attrs = {
             'enable_elastic_memory': getattr(multi_model_server_args, 'enable_elastic_memory', False),
