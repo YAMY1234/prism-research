@@ -532,15 +532,9 @@ def apply_scheduler_patch():
                     self.process_input_requests(gs)
 
                 if getattr(self, '_activated', False):
-                    if hasattr(self, 'recv_requests'):
-                        try:
-                            rr = self.recv_requests()
-                            if rr:
-                                logger.info(f"Prism: [{_name}] recv_requests got {len(rr)} reqs")
-                                self.process_input_requests(rr)
-                        except Exception as recv_err:
-                            if _n <= 3:
-                                logger.warning(f"Prism: [{_name}] recv_requests error: {recv_err}")
+                    # Skip recv_requests for now - Prism uses Redis instead of ZMQ for generate requests
+                    # recv_requests() reads from tokenizer_manager via ZMQ, which is not used in Prism
+                    # TODO: re-enable if we need to support ZMQ-based request flow
 
                     rq = self._prism_recv_generation_requests()
                     if rq:
