@@ -532,26 +532,32 @@ def apply_scheduler_patch():
                 if _tn - _tl >= 5.0:
                     _tl = _tn
                     logger.info(f"Prism: [{_name}] heartbeat loop#{_n} act={getattr(self,'_activated','?')}")
-                    _sys.stderr.write(f"[{_name}] heartbeat #{_n}\n")
-                    _sys.stderr.flush()
 
+                if _n <= 2:
+                    _sys.stderr.write(f"[{_name}] #{_n} step=A gpu_sched_recv\n")
+                    _sys.stderr.flush()
                 gs = self._prism_recv_gpu_scheduler_requests()
                 if gs:
                     logger.info(f"Prism: [{_name}] Got {len(gs)} GPU Scheduler reqs: {[type(r).__name__ for r in gs]}")
                     self.process_input_requests(gs)
 
                 if getattr(self, '_activated', False):
-                    # Skip recv_requests for now - Prism uses Redis instead of ZMQ for generate requests
-                    # recv_requests() reads from tokenizer_manager via ZMQ, which is not used in Prism
-                    # TODO: re-enable if we need to support ZMQ-based request flow
-
+                    if _n <= 2:
+                        _sys.stderr.write(f"[{_name}] #{_n} step=B redis_recv\n")
+                        _sys.stderr.flush()
                     rq = self._prism_recv_generation_requests()
                     if rq:
                         logger.info(f"Prism: [{_name}] Redis got {len(rq)} generate reqs")
                         for r in rq:
                             self._prism_handle_raw_generate_request(r)
 
+                    if _n <= 2:
+                        _sys.stderr.write(f"[{_name}] #{_n} step=C get_next_batch\n")
+                        _sys.stderr.flush()
                     b = self.get_next_batch_to_run()
+                    if _n <= 2:
+                        _sys.stderr.write(f"[{_name}] #{_n} step=D batch={b is not None}\n")
+                        _sys.stderr.flush()
                     if b:
                         res = self.run_batch(b)
                         self.process_batch_result(b, res)
