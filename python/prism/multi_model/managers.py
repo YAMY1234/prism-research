@@ -142,16 +142,20 @@ def run_scheduler_process(
         )
         
         # Initialize scheduler with pip-installed SGLang parameters
-        # pip SGLang Scheduler signature: (server_args, port_args, gpu_id, tp_rank, moe_ep_rank, pp_rank, dp_rank)
-        scheduler = Scheduler(
-            server_args,
-            sglang_port_args,
-            gpu_id,
-            tp_rank,
-            0,  # moe_ep_rank
-            0,  # pp_rank
-            dp_rank,
-        )
+        # Latest SGLang Scheduler signature: (server_args, port_args, gpu_id, tp_rank, moe_ep_rank, pp_rank, attn_cp_rank, moe_dp_rank, dp_rank)
+        import inspect
+        scheduler_params = inspect.signature(Scheduler.__init__).parameters
+        scheduler_kwargs = {
+            "server_args": server_args,
+            "port_args": sglang_port_args,
+            "gpu_id": gpu_id,
+            "tp_rank": tp_rank,
+            "dp_rank": dp_rank,
+        }
+        for param_name in ["moe_ep_rank", "pp_rank", "attn_cp_rank", "moe_dp_rank"]:
+            if param_name in scheduler_params:
+                scheduler_kwargs[param_name] = 0
+        scheduler = Scheduler(**scheduler_kwargs)
         
         # Store WorkerPool parameters as attributes (prism-old style)
         scheduler.model_names_to_model_paths = model_names_to_model_paths
