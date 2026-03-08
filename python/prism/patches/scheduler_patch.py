@@ -518,13 +518,22 @@ def apply_scheduler_patch():
                      f"has_redis={_has_redis}, backend_key_prefix={_bkp}, "
                      f"tp_rank={getattr(self,'tp_rank','?')}")
 
+        import sys as _sys
+        _sys.stderr.write(f"[{_name}] ENTERING WHILE TRUE LOOP\n")
+        _sys.stderr.flush()
+
         while True:
             _n += 1
+            if _n == 1:
+                _sys.stderr.write(f"[{_name}] FIRST ITERATION n=1\n")
+                _sys.stderr.flush()
             try:
                 _tn = _t.time()
                 if _tn - _tl >= 5.0:
                     _tl = _tn
                     logger.info(f"Prism: [{_name}] heartbeat loop#{_n} act={getattr(self,'_activated','?')}")
+                    _sys.stderr.write(f"[{_name}] heartbeat #{_n}\n")
+                    _sys.stderr.flush()
 
                 gs = self._prism_recv_gpu_scheduler_requests()
                 if gs:
