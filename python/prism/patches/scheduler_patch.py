@@ -511,37 +511,43 @@ def apply_scheduler_patch():
         self.last_batch = None
         _n = 0
         _tl = _t.time()
-        import os as _os
-        _pid = _os.getpid()
-        _dbg_path = f"/tmp/prism_worker_{_pid}.log"
-        def _dbg(msg):
-            with open(_dbg_path, "a") as f:
-                f.write(f"{_t.time():.3f} [{_name}] {msg}\n")
-        _dbg(f"entering while True, activated={getattr(self,'_activated','?')}")
+
+        _has_redis = getattr(self, 'redis_client', None) is not None
+        _bkp = getattr(getattr(self, 'server_args', None), 'backend_generate_request_key_prefix', None)
+        logger.info(f"Prism: [{_name}] loop config: activated={getattr(self,'_activated','?')}, "
+                     f"has_redis={_has_redis}, backend_key_prefix={_bkp}, "
+                     f"tp_rank={getattr(self,'tp_rank','?')}")
+
         while True:
             _n += 1
             try:
                 _tn = _t.time()
-                if _tn - _tl >= 3.0:
+                if _tn - _tl >= 5.0:
                     _tl = _tn
-                    print(f"[{_name}] loop#{_n} act={getattr(self,'_activated','?')}", flush=True)
-                if _n <= 5 or _n % 1000 == 0:
-                    _dbg(f"loop#{_n} begin")
+                    logger.info(f"Prism: [{_name}] heartbeat loop#{_n} act={getattr(self,'_activated','?')}")
+
                 gs = self._prism_recv_gpu_scheduler_requests()
-                if _n <= 5:
-                    _dbg(f"loop#{_n} gpu_sched={len(gs)}")
                 if gs:
-                    logger.info(f"Prism: Got {len(gs)} GPU Scheduler reqs")
+                    logger.info(f"Prism: [{_name}] Got {len(gs)} GPU Scheduler reqs: {[type(r).__name__ for r in gs]}")
                     self.process_input_requests(gs)
+
                 if getattr(self, '_activated', False):
                     if hasattr(self, 'recv_requests'):
-                        rr = self.recv_requests()
-                        if rr:
-                            self.process_input_requests(rr)
+                        try:
+                            rr = self.recv_requests()
+                            if rr:
+                                logger.info(f"Prism: [{_name}] recv_requests got {len(rr)} reqs")
+                                self.process_input_requests(rr)
+                        except Exception as recv_err:
+                            if _n <= 3:
+                                logger.warning(f"Prism: [{_name}] recv_requests error: {recv_err}")
+
                     rq = self._prism_recv_generation_requests()
                     if rq:
+                        logger.info(f"Prism: [{_name}] Redis got {len(rq)} generate reqs")
                         for r in rq:
                             self._prism_handle_raw_generate_request(r)
+
                     b = self.get_next_batch_to_run()
                     if b:
                         res = self.run_batch(b)
@@ -563,9 +569,9 @@ def apply_scheduler_patch():
                 else:
                     _t.sleep(0.001)
             except Exception as e:
-                print(f"[{_name}] LOOP ERR #{_n}: {e}", flush=True)
+                logger.error(f"Prism: [{_name}] LOOP ERROR #{_n}: {e}")
                 import traceback
-                traceback.print_exc()
+                logger.error(traceback.format_exc())
                 _t.sleep(1.0)
     
     # Apply patches to Scheduler class
